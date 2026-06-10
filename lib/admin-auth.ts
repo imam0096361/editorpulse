@@ -100,8 +100,9 @@ export async function verifyAdminSessionToken(token?: string | null) {
   }
 }
 
-export function getAdminSessionCookieValue() {
-  return cookies().get(ADMIN_SESSION_COOKIE)?.value || null;
+export async function getAdminSessionCookieValue() {
+  const cookieStore = await cookies();
+  return cookieStore.get(ADMIN_SESSION_COOKIE)?.value || null;
 }
 
 export async function isAdminRequestAuthorized(req: NextRequest) {
