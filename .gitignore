@@ -6,3 +6,4 @@ coverage/
 *.swp
 .env*
 !.env.example
+public/uploads/
