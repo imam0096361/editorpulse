@@ -1,0 +1,6 @@
+{
+  "name": "EditorPulse",
+  "description": "Publication summary system that automatically handles OCR analysis, front & back page summarization, and jump news integration.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
