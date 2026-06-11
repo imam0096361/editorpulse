@@ -136,7 +136,7 @@ export default function AdminPage() {
   const fetchEditions = useCallback(async () => {
     setIsLoadingEditions(true);
     try {
-      const res = await fetch("/api/editions");
+      const res = await fetch("/api/editions", { cache: "no-store" });
       const data = await readJsonResponse(res);
       setPublications(data.publications || []);
     } catch (error) {

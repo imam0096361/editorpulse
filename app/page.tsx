@@ -260,7 +260,7 @@ export default function Home() {
   const fetchPublications = useCallback(async () => {
     setIsLoadingPubs(true);
     try {
-      const res = await fetch("/api/editions");
+      const res = await fetch("/api/editions", { cache: "no-store" });
       const data = await res.json();
       setUploadedPubs(data.publications || []);
     } catch (err) {
@@ -270,23 +270,15 @@ export default function Home() {
     }
   }, []);
 
-  // Auto-seed Prothom Alo on first load
-  const seedProthomAlo = useCallback(async () => {
-    try {
-      await fetch("/api/seed", { method: "POST" });
-      await fetchPublications();
-    } catch { /* ignore */ }
-  }, [fetchPublications]);
-
   useEffect(() => {
-    seedProthomAlo();
-  }, [seedProthomAlo]);
+    fetchPublications();
+  }, [fetchPublications]);
 
   // Fetch edition pages when a publication+date is selected
   const fetchEditionPages = useCallback(async (pubId: string, date: string) => {
     setIsLoadingPages(true);
     try {
-      const res = await fetch(`/api/editions/${pubId}/${date}`);
+      const res = await fetch(`/api/editions/${encodeURIComponent(pubId)}/${encodeURIComponent(date)}`);
       const data = await res.json();
       if (data.pages && data.pages.length > 0) {
         setPageImages(data.pages);

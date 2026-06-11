@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { ArrowRight, Shield } from "lucide-react";
 import { EditorPulseLogo } from "@/components/editor-pulse-logo";
@@ -13,6 +13,10 @@ export default function AdminLoginForm() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    router.prefetch(nextPath);
+  }, [nextPath, router]);
 
   const onSubmit = async (e: React.FormEvent) => {
     e.preventDefault();

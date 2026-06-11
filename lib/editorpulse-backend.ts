@@ -31,6 +31,11 @@ export type PublicationRecord = {
   name: string;
 };
 
+export type EditionListRecord = Pick<
+  EditionRecord,
+  "publication_id" | "publication_name" | "date" | "edition" | "page_count"
+>;
+
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || "";
 const supabaseKey =
   process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
@@ -148,12 +153,12 @@ export async function deletePagesFromSupabaseStorage(pageUrls: string[]) {
 }
 
 export async function listPublicationsFromSupabase() {
-  const publications = await supabaseRequest<PublicationRecord[]>(
-    "/rest/v1/publications?select=id,name&order=name.asc"
-  );
-  const editions = await supabaseRequest<EditionRecord[]>(
-    "/rest/v1/editions?select=publication_id,publication_name,date,edition,page_count,pages,front_page,page_three,back_page,ocr_confidence&order=publication_name.asc,date.desc"
-  );
+  const [publications, editions] = await Promise.all([
+    supabaseRequest<PublicationRecord[]>("/rest/v1/publications?select=id,name&order=name.asc"),
+    supabaseRequest<EditionListRecord[]>(
+      "/rest/v1/editions?select=publication_id,publication_name,date,edition,page_count&order=publication_name.asc,date.desc"
+    ),
+  ]);
 
   return { publications, editions };
 }

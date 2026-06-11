@@ -4,6 +4,7 @@ import path from "path";
 import { listPublicationsFromSupabase } from "@/lib/editorpulse-backend";
 
 const UPLOADS_DIR = path.join(process.cwd(), "public", "uploads");
+export const dynamic = "force-dynamic";
 
 export interface EditionInfo {
   publicationId: string;
@@ -117,7 +118,7 @@ export async function GET() {
           date: edition.date,
           edition: edition.edition || "Standard Edition",
           pageCount: edition.page_count || 0,
-          pages: edition.pages || [],
+          pages: [],
         });
         grouped.set(pubId, editionList);
       }
