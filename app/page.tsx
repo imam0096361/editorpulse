@@ -239,6 +239,8 @@ export default function Home() {
   // Page Viewer state
   const [currentPage, setCurrentPage] = useState(0);
   const [zoom, setZoom] = useState(1);
+  const [pan, setPan] = useState({ x: 0, y: 0 });
+  const [isPanning, setIsPanning] = useState(false);
   const [pageImages, setPageImages] = useState<string[]>([]);
   const [editionMeta, setEditionMeta] = useState<EditionInfo | null>(null);
   const [isLoadingPages, setIsLoadingPages] = useState(false);
@@ -255,6 +257,90 @@ export default function Home() {
 
   const thumbnailStripRef = useRef<HTMLDivElement>(null);
   const viewerRef = useRef<HTMLDivElement>(null);
+  const activePointersRef = useRef(new Map<number, { x: number; y: number }>());
+  const lastPointerRef = useRef<{ x: number; y: number } | null>(null);
+  const pinchRef = useRef<{
+    distance: number;
+    zoom: number;
+    center: { x: number; y: number };
+  } | null>(null);
+  const zoomRef = useRef(zoom);
+  const panRef = useRef(pan);
+
+  useEffect(() => {
+    zoomRef.current = zoom;
+  }, [zoom]);
+
+  useEffect(() => {
+    panRef.current = pan;
+  }, [pan]);
+
+  const clampZoom = (value: number) => Math.min(Math.max(value, 1), 5);
+
+  const resetViewerPosition = useCallback(() => {
+    setZoom(1);
+    setPan({ x: 0, y: 0 });
+    setIsPanning(false);
+    activePointersRef.current.clear();
+    pinchRef.current = null;
+    lastPointerRef.current = null;
+  }, []);
+
+  const getViewerPoint = useCallback((clientX: number, clientY: number) => {
+    const rect = viewerRef.current?.getBoundingClientRect();
+    if (!rect) {
+      return { x: 0, y: 0 };
+    }
+
+    return {
+      x: clientX - rect.left - rect.width / 2,
+      y: clientY - rect.top - rect.height / 2,
+    };
+  }, []);
+
+  const zoomAtPoint = useCallback((clientX: number, clientY: number, nextZoomValue: number) => {
+    const nextZoom = clampZoom(nextZoomValue);
+    if (nextZoom <= 1) {
+      setZoom(1);
+      setPan({ x: 0, y: 0 });
+      setIsPanning(false);
+      return;
+    }
+
+    const currentZoom = zoomRef.current;
+    const point = getViewerPoint(clientX, clientY);
+    const ratio = nextZoom / currentZoom;
+    const currentPan = panRef.current;
+
+    setZoom(nextZoom);
+    setPan({
+      x: point.x - (point.x - currentPan.x) * ratio,
+      y: point.y - (point.y - currentPan.y) * ratio,
+    });
+  }, [getViewerPoint]);
+
+  const zoomFromCenter = useCallback((nextZoomValue: number) => {
+    const rect = viewerRef.current?.getBoundingClientRect();
+    if (!rect) {
+      setZoom(clampZoom(nextZoomValue));
+      return;
+    }
+
+    zoomAtPoint(rect.left + rect.width / 2, rect.top + rect.height / 2, nextZoomValue);
+  }, [zoomAtPoint]);
+
+  const getPointerDistance = (points: { x: number; y: number }[]) => {
+    const [first, second] = points;
+    return Math.hypot(first.x - second.x, first.y - second.y);
+  };
+
+  const getPointerCenter = (points: { x: number; y: number }[]) => {
+    const [first, second] = points;
+    return {
+      x: (first.x + second.x) / 2,
+      y: (first.y + second.y) / 2,
+    };
+  };
 
   // Fetch uploaded publications
   const fetchPublications = useCallback(async () => {
@@ -284,7 +370,7 @@ export default function Home() {
         setPageImages(data.pages);
         setEditionMeta(data);
         setCurrentPage(0);
-        setZoom(1);
+        resetViewerPosition();
       } else {
         setPageImages([]);
         setEditionMeta(null);
@@ -295,7 +381,7 @@ export default function Home() {
     } finally {
       setIsLoadingPages(false);
     }
-  }, []);
+  }, [resetViewerPosition]);
 
   // When selectedPubId or selectedDate changes, load pages
   useEffect(() => {
@@ -345,15 +431,19 @@ export default function Home() {
         setCurrentPage(pageImages.length - 1);
       } else if (e.key === "+" || e.key === "=") {
         e.preventDefault();
-        setZoom(prev => Math.min(prev + 0.25, 3));
+        zoomFromCenter(zoomRef.current + 0.25);
       } else if (e.key === "-") {
         e.preventDefault();
-        setZoom(prev => Math.max(prev - 0.25, 0.5));
+        zoomFromCenter(zoomRef.current - 0.25);
       }
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [viewMode, pageImages.length]);
+  }, [viewMode, pageImages.length, zoomFromCenter]);
+
+  useEffect(() => {
+    resetViewerPosition();
+  }, [currentPage, resetViewerPosition]);
 
   // Auto scroll thumbnail strip to active
   useEffect(() => {
@@ -432,6 +522,82 @@ export default function Home() {
     document.body.appendChild(a);
     a.click();
     a.remove();
+  };
+
+  const handleViewerWheel = (event: React.WheelEvent<HTMLDivElement>) => {
+    if (!pageImages.length) return;
+    event.preventDefault();
+    const direction = event.deltaY < 0 ? 1 : -1;
+    const factor = direction > 0 ? 1.16 : 0.86;
+    zoomAtPoint(event.clientX, event.clientY, zoomRef.current * factor);
+  };
+
+  const handleViewerPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (!pageImages.length) return;
+
+    event.currentTarget.setPointerCapture(event.pointerId);
+    activePointersRef.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
+
+    if (activePointersRef.current.size === 1) {
+      setIsPanning(zoomRef.current > 1);
+      lastPointerRef.current = { x: event.clientX, y: event.clientY };
+      return;
+    }
+
+    if (activePointersRef.current.size === 2) {
+      const points = Array.from(activePointersRef.current.values());
+      pinchRef.current = {
+        distance: getPointerDistance(points),
+        zoom: zoomRef.current,
+        center: getPointerCenter(points),
+      };
+      setIsPanning(true);
+    }
+  };
+
+  const handleViewerPointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (!activePointersRef.current.has(event.pointerId)) return;
+
+    activePointersRef.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
+
+    if (activePointersRef.current.size === 2 && pinchRef.current) {
+      const points = Array.from(activePointersRef.current.values());
+      const distance = getPointerDistance(points);
+      const center = getPointerCenter(points);
+      const nextZoom = pinchRef.current.zoom * (distance / Math.max(pinchRef.current.distance, 1));
+      zoomAtPoint(center.x, center.y, nextZoom);
+      return;
+    }
+
+    if (activePointersRef.current.size === 1 && lastPointerRef.current && zoomRef.current > 1) {
+      const deltaX = event.clientX - lastPointerRef.current.x;
+      const deltaY = event.clientY - lastPointerRef.current.y;
+      lastPointerRef.current = { x: event.clientX, y: event.clientY };
+      setPan((current) => ({ x: current.x + deltaX, y: current.y + deltaY }));
+    }
+  };
+
+  const handleViewerPointerUp = (event: React.PointerEvent<HTMLDivElement>) => {
+    activePointersRef.current.delete(event.pointerId);
+    pinchRef.current = null;
+
+    if (activePointersRef.current.size === 1) {
+      const remainingPoint = Array.from(activePointersRef.current.values())[0];
+      lastPointerRef.current = remainingPoint;
+      setIsPanning(zoomRef.current > 1);
+      return;
+    }
+
+    lastPointerRef.current = null;
+    setIsPanning(false);
+  };
+
+  const handleViewerDoubleClick = (event: React.MouseEvent<HTMLDivElement>) => {
+    if (zoomRef.current < 2) {
+      zoomAtPoint(event.clientX, event.clientY, 2.35);
+    } else {
+      resetViewerPosition();
+    }
   };
 
   if (!isMounted) {
@@ -778,10 +944,23 @@ export default function Home() {
                 </div>
 
                 {/* Main Page Viewer */}
-                <div ref={viewerRef} className="flex-1 relative overflow-hidden">
+                <div
+                  ref={viewerRef}
+                  className={cn(
+                    "flex-1 relative overflow-hidden bg-[radial-gradient(circle_at_center,#172033_0%,#0B1120_68%)] select-none touch-none",
+                    zoom > 1 ? (isPanning ? "cursor-grabbing" : "cursor-grab") : "cursor-zoom-in"
+                  )}
+                  onWheel={handleViewerWheel}
+                  onPointerDown={handleViewerPointerDown}
+                  onPointerMove={handleViewerPointerMove}
+                  onPointerUp={handleViewerPointerUp}
+                  onPointerCancel={handleViewerPointerUp}
+                  onDoubleClick={handleViewerDoubleClick}
+                >
                   {/* Navigation Arrows */}
                   <button
                     className="page-nav-btn prev"
+                    onPointerDown={(event) => event.stopPropagation()}
                     onClick={() => setCurrentPage(prev => Math.max(prev - 1, 0))}
                     disabled={currentPage === 0}
                   >
@@ -789,6 +968,7 @@ export default function Home() {
                   </button>
                   <button
                     className="page-nav-btn next"
+                    onPointerDown={(event) => event.stopPropagation()}
                     onClick={() => setCurrentPage(prev => Math.min(prev + 1, pageImages.length - 1))}
                     disabled={currentPage === pageImages.length - 1}
                   >
@@ -796,22 +976,15 @@ export default function Home() {
                   </button>
 
                   {/* Page Image */}
-                  <div 
-                    className="w-full h-full overflow-auto flex p-4"
-                    style={{
-                      justifyContent: zoom > 1 ? "flex-start" : "center",
-                      alignItems: zoom > 1 ? "flex-start" : "center"
-                    }}
-                  >
+                  <div className="w-full h-full overflow-hidden flex items-center justify-center p-3 md:p-5">
                     <AnimatePresence mode="wait">
                       <div
                         key={currentPage}
-                        className="relative flex items-center justify-center"
+                        className="relative flex h-full w-full items-center justify-center"
                         style={{
-                          width: zoom === 1 ? "100%" : `${zoom * 100}%`,
-                          height: zoom === 1 ? "100%" : "auto",
-                          transition: "width 0.2s ease, height 0.2s ease",
-                          margin: "auto"
+                          transform: `translate3d(${pan.x}px, ${pan.y}px, 0) scale(${zoom})`,
+                          transformOrigin: "center center",
+                          transition: isPanning ? "none" : "transform 160ms ease",
                         }}
                       >
                         <motion.img
@@ -823,10 +996,10 @@ export default function Home() {
                           transition={{ duration: 0.2 }}
                           style={{
                             maxWidth: "100%",
-                            maxHeight: zoom === 1 ? "100%" : "none",
+                            maxHeight: "100%",
                             objectFit: "contain",
                           }}
-                          className="rounded shadow-2xl"
+                          className="max-h-full rounded shadow-2xl pointer-events-none"
                           draggable={false}
                         />
                       </div>
@@ -834,17 +1007,32 @@ export default function Home() {
                   </div>
 
                   {/* Zoom Controls */}
-                  <div className="zoom-controls">
-                    <button className="zoom-btn" onClick={() => setZoom(prev => Math.max(prev - 0.25, 0.25))}>
+                  <div className="zoom-controls" onPointerDown={(event) => event.stopPropagation()}>
+                    <button
+                      className="zoom-btn"
+                      onClick={() => zoomFromCenter(zoomRef.current - 0.25)}
+                      title="Zoom out"
+                    >
                       <ZoomOut className="w-4 h-4" />
                     </button>
                     <span className="zoom-btn text-xs font-mono text-slate-400 cursor-default">
                       {Math.round(zoom * 100)}%
                     </span>
-                    <button className="zoom-btn" onClick={() => setZoom(prev => Math.min(prev + 0.25, 4))}>
+                    <button
+                      className="zoom-btn"
+                      onClick={() => zoomFromCenter(zoomRef.current + 0.25)}
+                      title="Zoom in"
+                    >
                       <ZoomIn className="w-4 h-4" />
                     </button>
-                    <button className="zoom-btn" onClick={() => setZoom(1)}>
+                    <button
+                      className="zoom-btn hidden sm:flex"
+                      onClick={() => zoomFromCenter(2.25)}
+                      title="Reading zoom"
+                    >
+                      <BookOpen className="w-4 h-4" />
+                    </button>
+                    <button className="zoom-btn" onClick={resetViewerPosition} title="Fit page">
                       <Maximize className="w-4 h-4" />
                     </button>
                   </div>
