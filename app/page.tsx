@@ -401,7 +401,6 @@ export default function Home() {
 
   // Check if this pub has uploaded pages
   const hasUploadedPages = pageImages.length > 0;
-
   // Build sidebar publication list combining uploaded and summary-only pubs
   const allPubIds = new Set<string>();
   const sidebarPubs: { id: string; name: string; hasPages: boolean; editions: EditionInfo[] }[] = [];
@@ -455,7 +454,13 @@ export default function Home() {
   }
 
   return (
-    <div id="app-root" className="flex flex-col md:flex-row h-screen w-screen bg-[#F3F4F6] text-slate-800 font-sans overflow-hidden">
+    <div
+      id="app-root"
+      className={cn(
+        "flex flex-col md:flex-row w-screen bg-[#F3F4F6] text-slate-800 font-sans",
+        viewMode === "summary" ? "min-h-screen md:h-screen md:overflow-hidden" : "h-screen overflow-hidden"
+      )}
+    >
 
       {/* Mobile Top Navigation */}
       <header className="md:hidden flex h-16 w-full items-center justify-between border-b bg-[#1E293B] px-4 text-white z-20">
@@ -512,11 +517,8 @@ export default function Home() {
                     setSelectedPubId(pub.id);
                     setSelectedDate(null);
                     setMobileMenuOpen(false);
-                    if (pub.hasPages) {
-                      setViewMode("pages");
-                    } else {
-                      setViewMode("summary");
-                    }
+                    setViewMode("summary");
+                    setActiveColumnTab("front");
                   }}
                   className={cn(
                     "w-full flex items-center justify-between px-3 py-2.5 rounded-lg text-left transition-all duration-150 group",
@@ -554,7 +556,8 @@ export default function Home() {
                         key={ed.date}
                         onClick={() => {
                           setSelectedDate(ed.date);
-                          setViewMode("pages");
+                          setViewMode("summary");
+                          setActiveColumnTab("front");
                           setMobileMenuOpen(false);
                         }}
                         className={cn(
@@ -597,7 +600,7 @@ export default function Home() {
       </aside>
 
       {/* Main Content */}
-      <main className="flex-1 flex flex-col min-w-0 bg-white">
+      <main className="flex-1 flex flex-col min-w-0 min-h-0 bg-white">
 
         {/* Top Header Bar */}
         <header className="h-16 border-b flex items-center justify-between px-4 md:px-6 bg-white flex-shrink-0">
@@ -918,12 +921,12 @@ export default function Home() {
         {viewMode === "summary" && (
           <>
             {/* Responsive Tabs bar for mobile */}
-            <div className="xl:hidden px-6 pt-4 bg-[#F8FAFC] flex-shrink-0">
+            <div className="xl:hidden sticky top-0 z-10 px-4 md:px-6 pt-4 pb-2 bg-[#F8FAFC] flex-shrink-0">
               <div className="flex bg-slate-200/60 p-1.5 rounded-2xl border border-slate-200/80 gap-1 shadow-2xs">
                 <button
                   onClick={() => setActiveColumnTab("front")}
                   className={cn(
-                    "flex-1 py-3 text-xs font-black uppercase tracking-wider rounded-xl transition-all duration-200 cursor-pointer text-center",
+                    "flex-1 py-2.5 text-[10px] sm:text-xs font-black uppercase rounded-xl transition-all duration-200 cursor-pointer text-center",
                     activeColumnTab === "front"
                       ? "bg-white text-blue-600 shadow-sm"
                       : "text-slate-600 hover:text-slate-900 hover:bg-slate-100"
@@ -934,7 +937,7 @@ export default function Home() {
                 <button
                   onClick={() => setActiveColumnTab("pageThree")}
                   className={cn(
-                    "flex-1 py-3 text-xs font-black uppercase tracking-wider rounded-xl transition-all duration-200 cursor-pointer text-center",
+                    "flex-1 py-2.5 text-[10px] sm:text-xs font-black uppercase rounded-xl transition-all duration-200 cursor-pointer text-center",
                     activeColumnTab === "pageThree"
                       ? "bg-white text-purple-600 shadow-sm"
                       : "text-slate-600 hover:text-slate-900 hover:bg-slate-100"
@@ -945,7 +948,7 @@ export default function Home() {
                 <button
                   onClick={() => setActiveColumnTab("back")}
                   className={cn(
-                    "flex-1 py-3 text-xs font-black uppercase tracking-wider rounded-xl transition-all duration-200 cursor-pointer text-center",
+                    "flex-1 py-2.5 text-[10px] sm:text-xs font-black uppercase rounded-xl transition-all duration-200 cursor-pointer text-center",
                     activeColumnTab === "back"
                       ? "bg-white text-amber-600 shadow-sm"
                       : "text-slate-600 hover:text-slate-900 hover:bg-slate-100"
@@ -957,11 +960,11 @@ export default function Home() {
             </div>
 
             {/* 3-Column News Summary View */}
-            <div className="flex-1 flex flex-col xl:flex-row gap-6 p-6 overflow-y-auto xl:overflow-hidden bg-[#F8FAFC]">
+            <div className="flex-1 flex flex-col xl:flex-row gap-4 md:gap-6 p-4 md:p-6 overflow-visible md:overflow-y-auto xl:overflow-hidden bg-[#F8FAFC]">
 
               {/* Column: Front Page */}
               <section className={cn(
-                "flex-1 flex flex-col min-w-0 bg-white rounded-2xl border border-slate-200 p-5 shadow-xs transition-all",
+                "flex flex-col min-w-0 min-h-0 xl:flex-1 bg-white rounded-2xl border border-slate-200 p-4 md:p-5 shadow-xs transition-all",
                 activeColumnTab !== "front" && "hidden xl:flex"
               )}>
                 <div className="flex items-center justify-between pb-4 border-b border-slate-100 mb-4 flex-shrink-0">
@@ -973,7 +976,7 @@ export default function Home() {
                     {activeSummaryPub.frontPage.length} stories
                   </span>
                 </div>
-                <div className="flex-1 overflow-y-auto pr-1 space-y-4">
+                <div className="xl:flex-1 xl:overflow-y-auto pr-1 space-y-4">
                   {activeSummaryPub.frontPage.map((story, i) => (
                     <article
                       key={i}
@@ -996,7 +999,7 @@ export default function Home() {
                       {story.subheadline && (
                         <p className="text-xs text-slate-500 font-medium italic mb-2 leading-relaxed">{story.subheadline}</p>
                       )}
-                      <p className="text-sm text-slate-600 leading-relaxed line-clamp-3 mb-2">{story.summary}</p>
+                      <p className="text-sm text-slate-600 leading-relaxed md:line-clamp-3 mb-2">{story.summary}</p>
                       {story.jumpMerged && (
                         <div className="flex items-center gap-2 pt-2 border-t border-slate-100 mt-2">
                           <span className="text-[10px] font-black text-blue-600 bg-blue-50 px-2 py-0.5 rounded border border-blue-100 uppercase tracking-widest flex items-center gap-1">
@@ -1014,7 +1017,7 @@ export default function Home() {
 
               {/* Column: Page Three */}
               <section className={cn(
-                "flex-1 flex flex-col min-w-0 bg-white rounded-2xl border border-slate-200 p-5 shadow-xs transition-all",
+                "flex flex-col min-w-0 min-h-0 xl:flex-1 bg-white rounded-2xl border border-slate-200 p-4 md:p-5 shadow-xs transition-all",
                 activeColumnTab !== "pageThree" && "hidden xl:flex"
               )}>
                 <div className="flex items-center justify-between pb-4 border-b border-slate-100 mb-4 flex-shrink-0">
@@ -1030,7 +1033,7 @@ export default function Home() {
                     {(activeSummaryPub.pageThree || []).length} stories
                   </span>
                 </div>
-                <div className="flex-1 overflow-y-auto pr-1 space-y-4">
+                <div className="xl:flex-1 xl:overflow-y-auto pr-1 space-y-4">
                   {(activeSummaryPub.pageThree || []).map((story, i) => (
                     <article
                       key={i}
@@ -1048,7 +1051,7 @@ export default function Home() {
                       {story.subheadline && (
                         <p className="text-xs text-slate-500 font-medium italic mb-2 leading-relaxed">{story.subheadline}</p>
                       )}
-                      <p className="text-sm text-slate-600 leading-relaxed line-clamp-3 mb-2">{story.summary}</p>
+                      <p className="text-sm text-slate-600 leading-relaxed md:line-clamp-3 mb-2">{story.summary}</p>
                       {story.jumpMerged && (
                         <div className="flex items-center gap-2 pt-2 border-t border-slate-100 mt-2">
                           <span className="text-[10px] font-black text-purple-600 bg-purple-50 px-2 py-0.5 rounded border border-purple-100 uppercase tracking-widest flex items-center gap-1">
@@ -1066,7 +1069,7 @@ export default function Home() {
 
               {/* Column: Back Page */}
               <section className={cn(
-                "flex-1 flex flex-col min-w-0 bg-white rounded-2xl border border-slate-200 p-5 shadow-xs transition-all",
+                "flex flex-col min-w-0 min-h-0 xl:flex-1 bg-white rounded-2xl border border-slate-200 p-4 md:p-5 shadow-xs transition-all",
                 activeColumnTab !== "back" && "hidden xl:flex"
               )}>
                 <div className="flex items-center justify-between pb-4 border-b border-slate-100 mb-4 flex-shrink-0">
@@ -1080,7 +1083,7 @@ export default function Home() {
                     {activeSummaryPub.backPage.length} features
                   </span>
                 </div>
-                <div className="flex-1 overflow-y-auto pr-1 space-y-4">
+                <div className="xl:flex-1 xl:overflow-y-auto pr-1 space-y-4">
                   {activeSummaryPub.backPage.map((story, i) => (
                     <article
                       key={i}
@@ -1098,7 +1101,7 @@ export default function Home() {
                       {story.subheadline && (
                         <p className="text-xs text-slate-500 font-medium italic mb-2 leading-relaxed">{story.subheadline}</p>
                       )}
-                      <p className="text-sm text-slate-600 leading-relaxed line-clamp-3 mb-2">{story.summary}</p>
+                      <p className="text-sm text-slate-600 leading-relaxed md:line-clamp-3 mb-2">{story.summary}</p>
                       {story.jumpMerged && (
                         <div className="flex items-center gap-2 pt-2 border-t border-slate-100 mt-2">
                           <span className="text-[10px] font-black text-amber-600 bg-amber-50 px-2 py-0.5 rounded border border-amber-100 uppercase tracking-widest flex items-center gap-1">
