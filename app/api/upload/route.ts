@@ -102,7 +102,7 @@ async function mergeStoryJump(
   console.log(`[Jump Resolution] Resolving jump for story "${story.title}" to Page ${jumpPageNumber}`);
   const { base64, mimeType } = await pageSourceToBase64(pageSources[jumpIndex] || savedPages[jumpIndex]);
   
-  const jumpPrompt = `You are a prestigious Chief Newspaper Editor.
+  const jumpPrompt = `You are a meticulous newspaper continuation editor. Accuracy is more important than completeness.
 We are analyzing a newspaper edition for "${publicationName}" on "${date}".
 Here is the beginning of a news story from Page ${story.originPage}:
 Title: "${story.title}"
@@ -112,15 +112,19 @@ Initial Summary: "${story.summary}"
 This story continues on Page ${jumpPageNumber}.
 I have uploaded the image of Page ${jumpPageNumber}.
 Please:
-1. Locate the continuation segment of this specific news story on the page image.
-2. Read the continuation text and extract all detailed facts, statistics, statements, and conclusions.
-3. Seamlessly merge and fuse the continuation content with the "Initial Summary" into a single, cohesive, highly detailed, editorial-grade narrative summary (at least 5 to 7 sentences, 150-250 words) that reads naturally and completely.
-4. Output your response as a JSON object matching this schema:
+1. Locate only the continuation segment of this exact story on the page image.
+2. Confirm the match using headline words, names, places, topic, continuation marker, column context, or repeated lead facts.
+3. If the page does not clearly contain this story's continuation, set "matched" to false and do not invent or merge unrelated material.
+4. If matched, read the continuation text and extract all detailed facts, statistics, statements, and conclusions.
+5. Seamlessly merge the continuation content with the "Initial Summary" into a single, cohesive, highly detailed, editorial-grade narrative summary (at least 5 to 7 sentences, 150-250 words) that reads naturally and completely.
+6. Output your response as a JSON object matching this schema:
 {
+  "matched": true,
+  "confidence": 0.95,
   "summary": "The consolidated complete summary text here",
-  "jumpDetails": "A brief trace explaining what details were merged from Page ${jumpPageNumber} (e.g. 'Unified detailed budget figures and central bank statements from Page 4 column 3.')"
+  "jumpDetails": "A brief trace explaining the exact match evidence and what details were merged from Page ${jumpPageNumber}."
 }
-Do not include markdown formatting or backticks outside of the JSON block itself.`;
+Do not include markdown formatting or backticks outside of the JSON block itself. Do not guess.`;
 
   try {
     const ai = getGeminiClient();
@@ -139,8 +143,10 @@ Do not include markdown formatting or backticks outside of the JSON block itself
         responseMimeType: "application/json",
         responseSchema: {
           type: Type.OBJECT,
-          required: ["summary", "jumpDetails"],
+          required: ["matched", "confidence", "summary", "jumpDetails"],
           properties: {
+            matched: { type: Type.BOOLEAN },
+            confidence: { type: Type.NUMBER },
             summary: { type: Type.STRING },
             jumpDetails: { type: Type.STRING }
           }
@@ -151,6 +157,11 @@ Do not include markdown formatting or backticks outside of the JSON block itself
     const textOutput = response.text;
     if (textOutput) {
       const parsed = JSON.parse(textOutput);
+      if (!parsed.matched || Number(parsed.confidence || 0) < 0.82) {
+        story.hasJump = false;
+        story.jumpDetails = `Continuation on Page ${jumpPageNumber} was not merged because the match was not confident enough.`;
+        return;
+      }
       story.summary = parsed.summary;
       story.jumpDetails = parsed.jumpDetails;
       story.jumpMerged = `P.${String(jumpPageNumber).padStart(2, "0")}`;
@@ -207,8 +218,14 @@ For each news story on the targeted pages, please extract and synthesize:
 - category: e.g. Lead News, Metropolitan, National Policy, Sports, Arts & Culture.
 - summary: A highly detailed, editorial-grade narrative summary (at least 3 to 5 substantial sentences, 100-150 words) structured as a complete news capsule. Do NOT write brief, generic, or truncated summaries. You must fully explain the context, key individuals, numbers/statistics, and events.
 - originPage: The source page of the lead story (e.g. "P.01", "P.02", "P.16").
-- hasJump: Set to true if the story's text clearly indicates it is continued or jumps to another page (e.g., "৪-এর পাতায় দেখুন", "Continued on Page 4", etc.), and false otherwise.
+- hasJump: Set to true only if the story text clearly contains a continuation marker or page jump instruction (e.g., "৪-এর পাতায় দেখুন", "বাকি অংশ পৃষ্ঠা ৪", "Continued on Page 4"). Do not infer a jump only because an article feels incomplete.
 - jumpPageNumber: The target page number where the story continues (1-based integer, e.g. 4. If hasJump is false, write null or omit).
+
+Jump/continuation accuracy rules:
+- Detect the exact printed continuation marker and target page number where possible.
+- Never merge a continuation unless the later page clearly matches the same story by headline/topic/names/places/lead facts.
+- Keep unrelated stories separate even if they share a broad topic.
+- If the target page number is unclear, set hasJump to false rather than guessing.
 
 Please categorize the final extracted stories as follows:
 ${categorizationInstructions}

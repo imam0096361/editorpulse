@@ -729,7 +729,7 @@ export default function AdminPage() {
                     <span className="font-bold">
                       {uploadProgress < 75 
                         ? "Uploading page scans..." 
-                        : "Ingesting & compiling Gemini OCR summaries..."
+                        : "Ingesting & compiling edition summaries..."
                       }
                     </span>
                     <span className="font-mono">{Math.round(uploadProgress)}%</span>

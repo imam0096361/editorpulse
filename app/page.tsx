@@ -618,7 +618,7 @@ export default function Home() {
                 {((activeSummaryPub as any).isDynamic) && (
                   <div className="flex items-center bg-emerald-50 text-emerald-700 rounded-lg px-2.5 py-1 text-[11px] border border-emerald-200 font-bold font-mono">
                     <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 mr-1.5 animate-pulse inline-block" />
-                    Gemini AI Summary
+                    Editorial Summary
                   </div>
                 )}
               </div>
