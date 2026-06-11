@@ -4,8 +4,10 @@ import path from "path";
 import { isAdminRequestAuthorized } from "@/lib/admin-auth";
 import {
   deleteEditionFromSupabase,
+  deletePagesFromSupabaseStorage,
   deletePublicationFromSupabase,
   getEditionFromSupabase,
+  listEditionDatesForPublication,
 } from "@/lib/editorpulse-backend";
 
 const UPLOADS_DIR = path.join(process.cwd(), "public", "uploads");
@@ -122,6 +124,7 @@ export async function DELETE(
       return NextResponse.json({ error: "Invalid edition path" }, { status: 400 });
     }
 
+    const backendEdition = await getEditionFromSupabase(pubId, date).catch(() => null);
     const pubPath = path.join(UPLOADS_DIR, pubId);
     const datePath = path.join(pubPath, date);
 
@@ -155,13 +158,18 @@ export async function DELETE(
     }
 
     try {
+      if (backendEdition?.pages?.length) {
+        await deletePagesFromSupabaseStorage(backendEdition.pages);
+      }
+
       await deleteEditionFromSupabase(pubId, date);
 
       const localRemaining = fs.existsSync(UPLOADS_DIR) && fs.existsSync(pubPath)
         ? fs.readdirSync(pubPath, { withFileTypes: true }).filter((entry) => entry.isDirectory()).length
         : 0;
+      const backendRemaining = await listEditionDatesForPublication(pubId).catch(() => []);
 
-      if (localRemaining === 0) {
+      if (localRemaining === 0 && backendRemaining.length === 0) {
         await deletePublicationFromSupabase(pubId);
       }
     } catch (dbError) {

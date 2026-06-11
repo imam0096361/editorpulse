@@ -47,6 +47,52 @@ const PUBLICATION_PRESETS = [
   { id: "custom", name: "— Custom Publication —" },
 ];
 
+async function readJsonResponse(res: Response) {
+  const text = await res.text();
+  try {
+    return text ? JSON.parse(text) : {};
+  } catch {
+    const message = text.includes("Request Entity Too Large")
+      ? "Upload image is too large for Vercel. Try a smaller scan or PDF export."
+      : text || `Request failed with status ${res.status}`;
+    throw new Error(message);
+  }
+}
+
+async function compressImageForUpload(file: File) {
+  if (!file.type.startsWith("image/") || file.type === "image/webp") {
+    return file;
+  }
+
+  const bitmap = await createImageBitmap(file);
+  const maxSide = 1800;
+  const ratio = Math.min(1, maxSide / Math.max(bitmap.width, bitmap.height));
+  const width = Math.max(1, Math.round(bitmap.width * ratio));
+  const height = Math.max(1, Math.round(bitmap.height * ratio));
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const context = canvas.getContext("2d");
+
+  if (!context) {
+    bitmap.close();
+    return file;
+  }
+
+  context.drawImage(bitmap, 0, 0, width, height);
+  bitmap.close();
+
+  const blob = await new Promise<Blob | null>((resolve) => {
+    canvas.toBlob(resolve, "image/jpeg", 0.78);
+  });
+
+  if (!blob || blob.size >= file.size) {
+    return file;
+  }
+
+  return new File([blob], file.name.replace(/\.[^.]+$/, ".jpg"), { type: "image/jpeg" });
+}
+
 export default function AdminPage() {
   const [isMounted, setIsMounted] = useState(false);
   useEffect(() => { setIsMounted(true); }, []);
@@ -91,7 +137,7 @@ export default function AdminPage() {
     setIsLoadingEditions(true);
     try {
       const res = await fetch("/api/editions");
-      const data = await res.json();
+      const data = await readJsonResponse(res);
       setPublications(data.publications || []);
     } catch (error) {
       console.error("Failed to fetch editions:", error);
@@ -229,15 +275,9 @@ export default function AdminPage() {
     setUploadResult(null);
 
     try {
-      const formData = new FormData();
-      formData.append("publicationName", pubName);
-      formData.append("publicationId", selectedPreset === "custom"
+      const publicationId = selectedPreset === "custom"
         ? pubName.toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9\-]/g, "")
-        : selectedPreset
-      );
-      formData.append("date", pubDate);
-      formData.append("edition", editionLabel);
-      formData.append("ocrPages", ocrPagesInput);
+        : selectedPreset;
 
       // Sort files by name (to maintain page order)
       const sortedFiles = [...attachedFiles].sort((a, b) => {
@@ -246,21 +286,40 @@ export default function AdminPage() {
         return numA - numB;
       });
 
-      for (const file of sortedFiles) {
-        formData.append("files", file);
+      const uploadedPages: string[] = [];
+      for (let index = 0; index < sortedFiles.length; index++) {
+        const file = await compressImageForUpload(sortedFiles[index]);
+        const pageFormData = new FormData();
+        pageFormData.append("file", file);
+        pageFormData.append("publicationId", publicationId);
+        pageFormData.append("date", pubDate);
+        pageFormData.append("pageIndex", String(index));
+
+        const pageRes = await fetch("/api/upload-page", { method: "POST", body: pageFormData });
+        const pageData = await readJsonResponse(pageRes);
+
+        if (!pageRes.ok || !pageData.success) {
+          throw new Error(pageData.error || `Failed uploading page ${index + 1}`);
+        }
+
+        uploadedPages[index] = pageData.pageUrl;
+        setUploadProgress(Math.round(((index + 1) / sortedFiles.length) * 70));
       }
 
-      // Simulate progress
-      const progressInterval = setInterval(() => {
-        setUploadProgress(prev => Math.min(prev + Math.random() * 15, 90));
-      }, 300);
+      const finalizeFormData = new FormData();
+      finalizeFormData.append("publicationName", pubName);
+      finalizeFormData.append("publicationId", publicationId);
+      finalizeFormData.append("date", pubDate);
+      finalizeFormData.append("edition", editionLabel);
+      finalizeFormData.append("ocrPages", ocrPagesInput);
+      finalizeFormData.append("pages", JSON.stringify(uploadedPages));
 
-      const res = await fetch("/api/upload", { method: "POST", body: formData });
-      clearInterval(progressInterval);
+      setUploadProgress(82);
+      const res = await fetch("/api/upload", { method: "POST", body: finalizeFormData });
       setUploadProgress(100);
 
-      const data = await res.json();
-      if (data.success) {
+      const data = await readJsonResponse(res);
+      if (res.ok && data.success) {
         setUploadResult({
           success: true,
           message: `Successfully uploaded ${data.pageCount} pages for ${pubName} (${pubDate})`,
@@ -288,8 +347,8 @@ export default function AdminPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ pubId: "prothom-alo", ocrPages: "1, 2, 17" })
       });
-      const data = await res.json();
-      if (data.success) {
+      const data = await readJsonResponse(res);
+      if (res.ok && data.success) {
         setUploadResult({
           success: true,
           message: data.alreadyExists
@@ -318,8 +377,8 @@ export default function AdminPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ pubId: "samakal", ocrPages: "1, 16" })
       });
-      const data = await res.json();
-      if (data.success) {
+      const data = await readJsonResponse(res);
+      if (res.ok && data.success) {
         setUploadResult({
           success: true,
           message: data.alreadyExists
@@ -356,7 +415,7 @@ export default function AdminPage() {
         `/api/editions/${encodeURIComponent(edition.publicationId)}/${encodeURIComponent(edition.date)}`,
         { method: "DELETE" }
       );
-      const data = await res.json();
+      const data = await readJsonResponse(res);
 
       if (!res.ok || !data.success) {
         throw new Error(data.error || "Delete failed");

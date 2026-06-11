@@ -1,9 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import fs from "fs";
+import os from "os";
 import path from "path";
 import { GoogleGenAI, Type } from "@google/genai";
 import { isAdminRequestAuthorized } from "@/lib/admin-auth";
-import { syncLocalEditionToSupabase } from "@/lib/editorpulse-backend";
+import { syncLocalEditionToSupabase, uploadPageToSupabaseStorage } from "@/lib/editorpulse-backend";
 
 const UPLOADS_DIR = path.join(process.cwd(), "public", "uploads");
 
@@ -40,6 +41,23 @@ function fileToBase64(filePath: string): { base64: string; mimeType: string } {
   };
 }
 
+async function pageSourceToBase64(pageSource: string): Promise<{ base64: string; mimeType: string }> {
+  if (/^https?:\/\//i.test(pageSource)) {
+    const response = await fetch(pageSource);
+    if (!response.ok) {
+      throw new Error(`Could not read uploaded page (${response.status})`);
+    }
+
+    const buffer = Buffer.from(await response.arrayBuffer());
+    return {
+      base64: buffer.toString("base64"),
+      mimeType: response.headers.get("content-type")?.split(";")[0] || "image/png",
+    };
+  }
+
+  return fileToBase64(path.join(process.cwd(), "public", pageSource));
+}
+
 export function parseOcrPages(input: string, totalPages: number): number[] {
   const pages = new Set<number>();
   const parts = input.split(",").map(p => p.trim().toLowerCase());
@@ -72,7 +90,8 @@ async function mergeStoryJump(
   date: string,
   story: any,
   jumpPageNumber: number,
-  savedPages: string[]
+  savedPages: string[],
+  pageSources: string[]
 ) {
   const jumpIndex = jumpPageNumber - 1;
   if (jumpIndex < 0 || jumpIndex >= savedPages.length) {
@@ -80,15 +99,8 @@ async function mergeStoryJump(
     return;
   }
 
-  const jumpPageUrl = savedPages[jumpIndex];
-  const diskPath = path.join(process.cwd(), "public", jumpPageUrl);
-  if (!fs.existsSync(diskPath)) {
-    console.warn(`Jump page file not found: ${diskPath}`);
-    return;
-  }
-
   console.log(`[Jump Resolution] Resolving jump for story "${story.title}" to Page ${jumpPageNumber}`);
-  const { base64, mimeType } = fileToBase64(diskPath);
+  const { base64, mimeType } = await pageSourceToBase64(pageSources[jumpIndex] || savedPages[jumpIndex]);
   
   const jumpPrompt = `You are a prestigious Chief Newspaper Editor.
 We are analyzing a newspaper edition for "${publicationName}" on "${date}".
@@ -155,7 +167,8 @@ export async function runGeminiOCR(
   edition: string,
   savedPages: string[],
   editionDir: string,
-  ocrPagesInput: string
+  ocrPagesInput: string,
+  pageSources: string[] = savedPages
 ) {
   const summaryPath = path.join(editionDir, "summary.json");
   
@@ -300,24 +313,22 @@ Ensure the resulting summaries act as an authoritative and complete digest allow
 
     // Load only the selected OCR pages
     ocrIndices.forEach((idx) => {
-      const url = savedPages[idx];
-      const diskPath = path.join(process.cwd(), "public", url);
-      if (fs.existsSync(diskPath)) {
-        const { base64, mimeType } = fileToBase64(diskPath);
-        parts.push({
-          inlineData: {
-            mimeType,
-            data: base64
-          }
-        });
-      }
+      const source = pageSources[idx] || savedPages[idx];
+      parts.push(pageSourceToBase64(source).then(({ base64, mimeType }) => ({
+        inlineData: {
+          mimeType,
+          data: base64
+        }
+      })));
     });
 
-    parts.push({ text: prompt });
+    const resolvedParts = await Promise.all(parts);
+
+    resolvedParts.push({ text: prompt });
 
     const response = await ai.models.generateContent({
       model: "gemini-3.5-flash",
-      contents: parts,
+      contents: resolvedParts,
       config: {
         responseMimeType: "application/json",
         responseSchema: {
@@ -397,17 +408,17 @@ Ensure the resulting summaries act as an authoritative and complete digest allow
     console.log("Checking for story jumps...");
     for (const story of parsedData.frontPage || []) {
       if (story.hasJump && story.jumpPageNumber) {
-        await mergeStoryJump(pubId, publicationName, date, story, story.jumpPageNumber, savedPages);
+        await mergeStoryJump(pubId, publicationName, date, story, story.jumpPageNumber, savedPages, pageSources);
       }
     }
     for (const story of parsedData.pageThree || []) {
       if (story.hasJump && story.jumpPageNumber) {
-        await mergeStoryJump(pubId, publicationName, date, story, story.jumpPageNumber, savedPages);
+        await mergeStoryJump(pubId, publicationName, date, story, story.jumpPageNumber, savedPages, pageSources);
       }
     }
     for (const story of parsedData.backPage || []) {
       if (story.hasJump && story.jumpPageNumber) {
-        await mergeStoryJump(pubId, publicationName, date, story, story.jumpPageNumber, savedPages);
+        await mergeStoryJump(pubId, publicationName, date, story, story.jumpPageNumber, savedPages, pageSources);
       }
     }
 
@@ -498,6 +509,8 @@ export async function POST(req: NextRequest) {
 
     const pubId = pubIdInput || sanitizeId(publicationName);
     const dateFormatted = date; // Expect YYYY-MM-DD format
+    const pagesJson = formData.get("pages") as string | null;
+    const stagedPages = pagesJson ? JSON.parse(pagesJson) as string[] : [];
 
     // Collect files
     const files: File[] = [];
@@ -507,39 +520,44 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    if (files.length === 0) {
+    if (files.length === 0 && stagedPages.length === 0) {
       return NextResponse.json(
-        { error: "At least one file is required" },
+        { error: "At least one uploaded page is required" },
         { status: 400 }
       );
     }
 
-    // Create directory structure
-    const editionDir = path.join(UPLOADS_DIR, pubId, dateFormatted);
+    const usesStagedStorage = stagedPages.length > 0;
+    const editionDir = usesStagedStorage
+      ? path.join(os.tmpdir(), "editorpulse", pubId, dateFormatted)
+      : path.join(UPLOADS_DIR, pubId, dateFormatted);
     fs.mkdirSync(editionDir, { recursive: true });
 
-    // Save files
-    const savedPages: string[] = [];
+    const savedPages: string[] = [...stagedPages];
     for (let i = 0; i < files.length; i++) {
       const file = files[i];
       const ext = file.name.split(".").pop() || "png";
       const fileName = `page-${(i + 1).toString().padStart(2, "0")}.${ext}`;
-      const filePath = path.join(editionDir, fileName);
 
       const arrayBuffer = await file.arrayBuffer();
       const buffer = Buffer.from(arrayBuffer);
-      fs.writeFileSync(filePath, buffer);
-
-      savedPages.push(`/uploads/${pubId}/${dateFormatted}/${fileName}`);
+      const objectPath = `${pubId}/${dateFormatted}/${fileName}`;
+      const pageUrl = await uploadPageToSupabaseStorage({
+        objectPath,
+        buffer,
+        contentType: file.type || "application/octet-stream",
+      });
+      savedPages.push(pageUrl);
     }
 
-    // Update manifest
-    updateManifest(pubId, publicationName, {
-      date: dateFormatted,
-      edition,
-      pageCount: files.length,
-      pages: savedPages,
-    });
+    if (!usesStagedStorage && files.length > 0 && !process.env.VERCEL) {
+      updateManifest(pubId, publicationName, {
+        date: dateFormatted,
+        edition,
+        pageCount: files.length,
+        pages: savedPages,
+      });
+    }
 
     const ocrPages = (formData.get("ocrPages") as string) || "1, 2, 17";
 
@@ -564,7 +582,7 @@ export async function POST(req: NextRequest) {
       publicationName,
       date: dateFormatted,
       edition,
-      pageCount: files.length,
+      pageCount: savedPages.length,
       pages: savedPages,
     });
   } catch (error: any) {

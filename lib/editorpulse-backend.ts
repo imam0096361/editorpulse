@@ -37,6 +37,7 @@ const supabaseKey =
   process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ||
   "";
 const editorpulseApiKey = process.env.EDITORPULSE_API_KEY || "";
+const storageBucket = process.env.SUPABASE_STORAGE_BUCKET || "editorpulse-pages";
 
 function ensureConfig() {
   if (!supabaseUrl || !supabaseKey || !editorpulseApiKey) {
@@ -69,7 +70,81 @@ async function supabaseRequest<T>(
     throw new Error(`Supabase request failed (${response.status}): ${text}`);
   }
 
-  return response.json() as Promise<T>;
+  const text = await response.text();
+  return (text ? JSON.parse(text) : null) as T;
+}
+
+function encodeObjectPath(objectPath: string) {
+  return objectPath.split("/").map(encodeURIComponent).join("/");
+}
+
+function objectPathFromPublicUrl(pageUrl: string) {
+  if (!supabaseUrl || !pageUrl.startsWith(supabaseUrl)) {
+    return null;
+  }
+
+  const marker = `/storage/v1/object/public/${storageBucket}/`;
+  const markerIndex = pageUrl.indexOf(marker);
+  if (markerIndex === -1) {
+    return null;
+  }
+
+  return decodeURIComponent(pageUrl.slice(markerIndex + marker.length));
+}
+
+export function getSupabaseStoragePublicUrl(objectPath: string) {
+  ensureConfig();
+  return `${supabaseUrl}/storage/v1/object/public/${storageBucket}/${encodeObjectPath(objectPath)}`;
+}
+
+export async function uploadPageToSupabaseStorage(options: {
+  objectPath: string;
+  buffer: Buffer;
+  contentType: string;
+}) {
+  ensureConfig();
+  const response = await fetch(
+    `${supabaseUrl}/storage/v1/object/${storageBucket}/${encodeObjectPath(options.objectPath)}`,
+    {
+      method: "POST",
+      headers: {
+        apikey: supabaseKey,
+        Authorization: `Bearer ${supabaseKey}`,
+        "x-editorpulse-api-key": editorpulseApiKey,
+        "Content-Type": options.contentType,
+        "x-upsert": "true",
+      },
+      body: options.buffer as unknown as BodyInit,
+    }
+  );
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Supabase storage upload failed (${response.status}): ${text}`);
+  }
+
+  return getSupabaseStoragePublicUrl(options.objectPath);
+}
+
+export async function deletePagesFromSupabaseStorage(pageUrls: string[]) {
+  const objectPaths = pageUrls
+    .map(objectPathFromPublicUrl)
+    .filter((objectPath): objectPath is string => Boolean(objectPath));
+
+  if (objectPaths.length === 0) {
+    return;
+  }
+
+  const response = await fetch(`${supabaseUrl}/storage/v1/object/${storageBucket}`, {
+    method: "DELETE",
+    headers: buildHeaders(),
+    body: JSON.stringify({ prefixes: objectPaths }),
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Supabase storage delete failed (${response.status}): ${text}`);
+  }
 }
 
 export async function listPublicationsFromSupabase() {
@@ -88,6 +163,12 @@ export async function getEditionFromSupabase(publicationId: string, date: string
     `/rest/v1/editions?select=publication_id,publication_name,date,edition,page_count,pages,front_page,page_three,back_page,ocr_confidence&publication_id=eq.${encodeURIComponent(publicationId)}&date=eq.${encodeURIComponent(date)}&limit=1`
   );
   return edition[0] || null;
+}
+
+export async function listEditionDatesForPublication(publicationId: string) {
+  return supabaseRequest<{ date: string }[]>(
+    `/rest/v1/editions?select=date&publication_id=eq.${encodeURIComponent(publicationId)}`
+  );
 }
 
 export async function upsertPublication(publicationId: string, publicationName: string) {
