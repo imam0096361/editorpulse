@@ -23,6 +23,17 @@ import {
   ChevronsLeft,
   ChevronsRight,
   RefreshCw,
+  Search,
+  Filter,
+  Star,
+  Users,
+  ClipboardList,
+  AlertTriangle,
+  GitCompare,
+  Target,
+  MessageSquare,
+  CheckCircle2,
+  Clock3,
 } from "lucide-react";
 import { EditorPulseLogo } from "@/components/editor-pulse-logo";
 import { cn } from "@/lib/utils";
@@ -70,6 +81,163 @@ interface PublicationGroup {
   name: string;
   editions: EditionInfo[];
 }
+
+type ViewMode = "desk" | "pages" | "summary";
+type DeskTab = "top" | "clusters" | "assignments" | "review" | "publications";
+type StoryStatus = "New" | "Reviewed" | "Assigned" | "In Progress" | "Published" | "Archived";
+type StoryPriority = "Breaking" | "High" | "Normal" | "Low";
+type StorySection = "frontPage" | "pageThree" | "backPage";
+
+interface NewsDeskStory {
+  id: string;
+  story: NewsStory;
+  publicationId: string;
+  publicationName: string;
+  date: string;
+  edition: string;
+  pageCount: number;
+  section: StorySection;
+  sectionLabel: string;
+  isMainPublication: boolean;
+  comparisonScore: number;
+  comparisonLabel: string;
+  mainMatchId?: string;
+  mainMatchTitle?: string;
+}
+
+interface StoryWorkflowState {
+  status: StoryStatus;
+  priority: StoryPriority;
+  assignedTo: string;
+  note: string;
+  updatedAt: string;
+}
+
+interface StoryCluster {
+  anchor: NewsDeskStory;
+  matches: NewsDeskStory[];
+}
+
+const MAIN_PUBLICATION_ID = "daily-star";
+const WORKFLOW_STORAGE_KEY = "editorpulse-newsdesk-workflow-v1";
+
+const deskTabs: { id: DeskTab; label: string; icon: React.ElementType }[] = [
+  { id: "top", label: "Top Stories", icon: Star },
+  { id: "clusters", label: "Clusters", icon: GitCompare },
+  { id: "assignments", label: "Assignments", icon: Users },
+  { id: "review", label: "Review Queue", icon: AlertTriangle },
+  { id: "publications", label: "Publications", icon: Newspaper },
+];
+
+const statusOptions: StoryStatus[] = ["New", "Reviewed", "Assigned", "In Progress", "Published", "Archived"];
+const priorityOptions: StoryPriority[] = ["Breaking", "High", "Normal", "Low"];
+const assigneeOptions = ["Unassigned", "News Desk", "Politics Desk", "Economy Desk", "Metro Desk", "Sports Desk", "Digital Desk"];
+
+const priorityRank: Record<StoryPriority, number> = {
+  Breaking: 0,
+  High: 1,
+  Normal: 2,
+  Low: 3,
+};
+
+const statusRank: Record<StoryStatus, number> = {
+  New: 0,
+  Assigned: 1,
+  "In Progress": 2,
+  Reviewed: 3,
+  Published: 4,
+  Archived: 5,
+};
+
+const sectionLabels: Record<StorySection, string> = {
+  frontPage: "Front",
+  pageThree: "Inside",
+  backPage: "Back",
+};
+
+const normalizeText = (value: string) =>
+  value
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s]+/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+const tokenizeStory = (story: NewsStory) => {
+  const stopWords = new Set([
+    "the", "and", "for", "with", "from", "that", "this", "will", "into", "amid", "news",
+    "page", "পৃষ্ঠা", "খবর", "এবং", "একটি", "করে", "নিয়ে", "জন্য", "থেকে", "হবে",
+  ]);
+  return new Set(
+    normalizeText(`${story.title} ${story.subheadline || ""} ${story.category} ${story.summary}`)
+      .split(" ")
+      .filter((token) => token.length > 2 && !stopWords.has(token))
+  );
+};
+
+const getSimilarityScore = (story: NewsStory, baseline: NewsStory) => {
+  const left = tokenizeStory(story);
+  const right = tokenizeStory(baseline);
+  if (left.size === 0 || right.size === 0) return 0;
+
+  let overlap = 0;
+  left.forEach((token) => {
+    if (right.has(token)) overlap += 1;
+  });
+
+  return Math.round((overlap / Math.max(Math.min(left.size, right.size), 1)) * 100);
+};
+
+const slugify = (value: string) =>
+  normalizeText(value)
+    .replace(/\s+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 72) || "story";
+
+const getDefaultPriority = (story: NewsStory): StoryPriority => {
+  const text = normalizeText(`${story.title} ${story.category} ${story.originPage}`);
+  if (text.includes("breaking") || text.includes("lead") || text.includes("গুরুত্বপূর্ণ")) return "Breaking";
+  if (story.originPage.includes("01") || story.jumpMerged) return "High";
+  if (text.includes("sports") || text.includes("খেলাধুলা") || text.includes("ক্রীড়া")) return "Normal";
+  return "Normal";
+};
+
+const getDefaultWorkflow = (story: NewsStory): StoryWorkflowState => ({
+  status: "New",
+  priority: getDefaultPriority(story),
+  assignedTo: "Unassigned",
+  note: "",
+  updatedAt: new Date().toISOString(),
+});
+
+const isNeedsReview = (deskStory: NewsDeskStory, workflow: StoryWorkflowState) =>
+  workflow.status === "New" ||
+  Boolean(deskStory.story.jumpMerged) ||
+  (!deskStory.isMainPublication && deskStory.comparisonScore < 18);
+
+const getPublicationStories = (publication: Publication): NewsDeskStory[] => {
+  const sections: { key: StorySection; stories: NewsStory[] }[] = [
+    { key: "frontPage", stories: publication.frontPage || [] },
+    { key: "pageThree", stories: publication.pageThree || [] },
+    { key: "backPage", stories: publication.backPage || [] },
+  ];
+
+  return sections.flatMap(({ key, stories }) =>
+    stories.map((story, index) => ({
+      id: `${publication.id}:${publication.date}:${key}:${index}:${slugify(story.title)}`,
+      story,
+      publicationId: publication.id,
+      publicationName: publication.name,
+      date: publication.date,
+      edition: publication.edition,
+      pageCount: publication.pageCount,
+      section: key,
+      sectionLabel: sectionLabels[key],
+      isMainPublication: publication.id === MAIN_PUBLICATION_ID,
+      comparisonScore: publication.id === MAIN_PUBLICATION_ID ? 100 : 0,
+      comparisonLabel: publication.id === MAIN_PUBLICATION_ID ? "Daily Star baseline" : "Not compared",
+    }))
+  );
+};
 
 // Hardcoded summary data for existing publications
 const summaryPublications: Publication[] = [
@@ -230,11 +398,26 @@ export default function Home() {
 
   // Sidebar / navigation
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
-  const [selectedPubId, setSelectedPubId] = useState<string>("prothom-alo");
+  const [selectedPubId, setSelectedPubId] = useState<string>(MAIN_PUBLICATION_ID);
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
 
-  // View mode: "pages" for page viewer, "summary" for AI summary
-  const [viewMode, setViewMode] = useState<"pages" | "summary">("pages");
+  // View mode: "desk" for cross-publication newsroom, "pages" for page viewer, "summary" for story summary
+  const [viewMode, setViewMode] = useState<ViewMode>("desk");
+  const [deskTab, setDeskTab] = useState<DeskTab>("top");
+  const [deskSearch, setDeskSearch] = useState("");
+  const [deskPublicationFilter, setDeskPublicationFilter] = useState("all");
+  const [deskPriorityFilter, setDeskPriorityFilter] = useState<StoryPriority | "all">("all");
+  const [deskStatusFilter, setDeskStatusFilter] = useState<StoryStatus | "all">("all");
+  const [workflowByStoryId, setWorkflowByStoryId] = useState<Record<string, StoryWorkflowState>>(() => {
+    if (typeof window === "undefined") return {};
+
+    try {
+      const storedWorkflow = window.localStorage.getItem(WORKFLOW_STORAGE_KEY);
+      return storedWorkflow ? JSON.parse(storedWorkflow) : {};
+    } catch {
+      return {};
+    }
+  });
 
   // Page Viewer state
   const [currentPage, setCurrentPage] = useState(0);
@@ -396,8 +579,6 @@ export default function Home() {
       } else {
         setPageImages([]);
         setEditionMeta(null);
-        // No uploaded pages, show summary view
-        setViewMode("summary");
       }
     }
   }, [selectedPubId, selectedDate, uploadedPubs, fetchEditionPages]);
@@ -480,6 +661,155 @@ export default function Home() {
   const pageThreeTitle = (activeSummaryPub.pageThree && activeSummaryPub.pageThree.length > 0 && activeSummaryPub.pageThree[0].originPage)
     ? `Page ${activeSummaryPub.pageThree[0].originPage.replace("P.", "").replace("P", "")}`
     : (isProthomAlo ? "Page 2" : "Page 3");
+
+  const dynamicSummaryPublication: Publication | null = (editionMeta && editionMeta.frontPage && editionMeta.frontPage.length > 0)
+    ? {
+        id: editionMeta.publicationId,
+        name: editionMeta.publicationName,
+        date: editionMeta.date,
+        edition: editionMeta.edition,
+        pageCount: editionMeta.pageCount || pageImages.length,
+        frontPage: editionMeta.frontPage || [],
+        pageThree: editionMeta.pageThree || [],
+        backPage: editionMeta.backPage || [],
+        ocrConfidence: editionMeta.ocrConfidence || 95,
+      }
+    : null;
+
+  const deskPublications = dynamicSummaryPublication
+    ? [
+        dynamicSummaryPublication,
+        ...summaryPublications.filter((publication) => (
+          publication.id !== dynamicSummaryPublication.id || publication.date !== dynamicSummaryPublication.date
+        )),
+      ]
+    : summaryPublications;
+
+  const baselineStories = deskPublications
+    .filter((publication) => publication.id === MAIN_PUBLICATION_ID)
+    .flatMap(getPublicationStories);
+
+  const deskStories = deskPublications
+    .flatMap(getPublicationStories)
+    .map((deskStory) => {
+      if (deskStory.isMainPublication) return deskStory;
+
+      const bestMatch = baselineStories.reduce<NewsDeskStory | null>((currentBest, baselineStory) => {
+        const score = getSimilarityScore(deskStory.story, baselineStory.story);
+        if (!currentBest || score > currentBest.comparisonScore) {
+          return { ...baselineStory, comparisonScore: score };
+        }
+        return currentBest;
+      }, null);
+
+      const comparisonScore = bestMatch?.comparisonScore || 0;
+      const comparisonLabel = comparisonScore >= 34
+        ? "Strong Daily Star match"
+        : comparisonScore >= 18
+          ? "Related angle"
+          : "Unique local angle";
+
+      return {
+        ...deskStory,
+        comparisonScore,
+        comparisonLabel,
+        mainMatchId: bestMatch?.id,
+        mainMatchTitle: bestMatch?.story.title,
+      };
+    });
+
+  const getWorkflow = (deskStory: NewsDeskStory) =>
+    workflowByStoryId[deskStory.id] || getDefaultWorkflow(deskStory.story);
+
+  const persistWorkflow = (nextWorkflow: Record<string, StoryWorkflowState>) => {
+    setWorkflowByStoryId(nextWorkflow);
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem(WORKFLOW_STORAGE_KEY, JSON.stringify(nextWorkflow));
+    }
+  };
+
+  const updateWorkflow = (deskStory: NewsDeskStory, patch: Partial<StoryWorkflowState>) => {
+    const currentWorkflow = getWorkflow(deskStory);
+    persistWorkflow({
+      ...workflowByStoryId,
+      [deskStory.id]: {
+        ...currentWorkflow,
+        ...patch,
+        updatedAt: new Date().toISOString(),
+      },
+    });
+  };
+
+  const deskSearchTerm = normalizeText(deskSearch);
+  const filteredDeskStories = deskStories
+    .filter((deskStory) => {
+      const workflow = getWorkflow(deskStory);
+      const searchableText = normalizeText([
+        deskStory.publicationName,
+        deskStory.story.title,
+        deskStory.story.subheadline || "",
+        deskStory.story.category,
+        deskStory.story.summary,
+        deskStory.story.originPage,
+        deskStory.mainMatchTitle || "",
+      ].join(" "));
+
+      return (
+        (!deskSearchTerm || searchableText.includes(deskSearchTerm)) &&
+        (deskPublicationFilter === "all" || deskStory.publicationId === deskPublicationFilter) &&
+        (deskPriorityFilter === "all" || workflow.priority === deskPriorityFilter) &&
+        (deskStatusFilter === "all" || workflow.status === deskStatusFilter)
+      );
+    })
+    .sort((a, b) => {
+      const workflowA = getWorkflow(a);
+      const workflowB = getWorkflow(b);
+      return (
+        priorityRank[workflowA.priority] - priorityRank[workflowB.priority] ||
+        statusRank[workflowA.status] - statusRank[workflowB.status] ||
+        Number(b.isMainPublication) - Number(a.isMainPublication) ||
+        b.comparisonScore - a.comparisonScore
+      );
+    });
+
+  const storyClusters: StoryCluster[] = baselineStories.map((anchor) => ({
+    anchor,
+    matches: filteredDeskStories
+      .filter((deskStory) => deskStory.mainMatchId === anchor.id && deskStory.comparisonScore >= 18)
+      .sort((a, b) => b.comparisonScore - a.comparisonScore),
+  }));
+
+  const uniqueNonBaselineStories = filteredDeskStories.filter((deskStory) => (
+    !deskStory.isMainPublication && (!deskStory.mainMatchId || deskStory.comparisonScore < 18)
+  ));
+
+  const reviewQueueStories = filteredDeskStories.filter((deskStory) => (
+    isNeedsReview(deskStory, getWorkflow(deskStory))
+  ));
+
+  const assignedStories = filteredDeskStories.filter((deskStory) => getWorkflow(deskStory).assignedTo !== "Unassigned");
+
+  const totalMatches = deskStories.filter((deskStory) => !deskStory.isMainPublication && deskStory.comparisonScore >= 18).length;
+  const dailyStarStoryCount = deskStories.filter((deskStory) => deskStory.isMainPublication).length;
+  const needsReviewCount = deskStories.filter((deskStory) => isNeedsReview(deskStory, getWorkflow(deskStory))).length;
+
+  const publicationScorecards = deskPublications.map((publication) => {
+    const publicationStories = deskStories.filter((deskStory) => deskStory.publicationId === publication.id);
+    const matchedStories = publicationStories.filter((deskStory) => deskStory.isMainPublication || deskStory.comparisonScore >= 18).length;
+    const highPriorityStories = publicationStories.filter((deskStory) => {
+      const priority = getWorkflow(deskStory).priority;
+      return priority === "Breaking" || priority === "High";
+    }).length;
+
+    return {
+      publication,
+      storyCount: publicationStories.length,
+      matchedStories,
+      uniqueStories: publicationStories.filter((deskStory) => !deskStory.isMainPublication && deskStory.comparisonScore < 18).length,
+      highPriorityStories,
+      matchRate: publicationStories.length > 0 ? Math.round((matchedStories / publicationStories.length) * 100) : 0,
+    };
+  });
 
   // Check if this pub has uploaded pages
   const hasUploadedPages = pageImages.length > 0;
@@ -598,6 +928,176 @@ export default function Home() {
     } else {
       resetViewerPosition();
     }
+  };
+
+  const getPriorityClasses = (priority: StoryPriority) => {
+    if (priority === "Breaking") return "bg-red-50 text-red-700 border-red-200";
+    if (priority === "High") return "bg-amber-50 text-amber-700 border-amber-200";
+    if (priority === "Low") return "bg-slate-50 text-slate-600 border-slate-200";
+    return "bg-blue-50 text-blue-700 border-blue-200";
+  };
+
+  const getStatusClasses = (status: StoryStatus) => {
+    if (status === "Published") return "bg-emerald-50 text-emerald-700 border-emerald-200";
+    if (status === "In Progress") return "bg-cyan-50 text-cyan-700 border-cyan-200";
+    if (status === "Assigned") return "bg-violet-50 text-violet-700 border-violet-200";
+    if (status === "Archived") return "bg-slate-100 text-slate-500 border-slate-200";
+    if (status === "Reviewed") return "bg-lime-50 text-lime-700 border-lime-200";
+    return "bg-white text-slate-700 border-slate-200";
+  };
+
+  const renderDeskStoryCard = (deskStory: NewsDeskStory, compact = false) => {
+    const workflow = getWorkflow(deskStory);
+    const needsReview = isNeedsReview(deskStory, workflow);
+
+    return (
+      <article
+        key={deskStory.id}
+        className={cn(
+          "rounded-2xl border bg-white shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-md",
+          deskStory.isMainPublication ? "border-amber-200 ring-1 ring-amber-100" : "border-slate-200",
+          needsReview && "border-l-4 border-l-rose-400",
+          compact ? "p-4" : "p-5"
+        )}
+      >
+        <div className="flex flex-col gap-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className={cn(
+              "inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-[10px] font-black uppercase tracking-widest",
+              deskStory.isMainPublication
+                ? "bg-amber-50 text-amber-800 border-amber-200"
+                : "bg-slate-50 text-slate-700 border-slate-200"
+            )}>
+              {deskStory.isMainPublication && <Star className="h-3 w-3 fill-amber-400 text-amber-500" />}
+              {deskStory.publicationName}
+            </span>
+            <span className="rounded-full bg-slate-100 px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider text-slate-500">
+              {deskStory.sectionLabel} • {deskStory.story.originPage}
+            </span>
+            <span className={cn("rounded-full border px-2.5 py-1 text-[10px] font-black uppercase tracking-wider", getPriorityClasses(workflow.priority))}>
+              {workflow.priority}
+            </span>
+            <span className={cn("rounded-full border px-2.5 py-1 text-[10px] font-black uppercase tracking-wider", getStatusClasses(workflow.status))}>
+              {workflow.status}
+            </span>
+          </div>
+
+          <button
+            type="button"
+            onClick={() => setSelectedStory(deskStory.story)}
+            className="text-left group"
+          >
+            <h3 className={cn(
+              "font-black text-slate-950 leading-tight tracking-tight group-hover:text-emerald-700 transition-colors",
+              compact ? "text-base" : "text-lg md:text-xl"
+            )}>
+              {deskStory.story.title}
+            </h3>
+            {deskStory.story.subheadline && !compact && (
+              <p className="mt-1.5 text-sm text-slate-500 italic leading-relaxed">
+                {deskStory.story.subheadline}
+              </p>
+            )}
+          </button>
+
+          {!compact && (
+            <p className="text-sm leading-relaxed text-slate-600 line-clamp-3">
+              {deskStory.story.summary}
+            </p>
+          )}
+
+          <div className="grid gap-2 md:grid-cols-2">
+            <div className="rounded-xl bg-slate-50 border border-slate-200 p-3">
+              <div className="mb-1 flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-slate-400">
+                <GitCompare className="h-3.5 w-3.5" />
+                Daily Star Compare
+              </div>
+              <p className="text-xs font-bold text-slate-800">
+                {deskStory.comparisonLabel}
+                {!deskStory.isMainPublication && ` • ${deskStory.comparisonScore}%`}
+              </p>
+              {deskStory.mainMatchTitle && (
+                <p className="mt-1 text-[11px] leading-relaxed text-slate-500 line-clamp-2">
+                  Baseline: {deskStory.mainMatchTitle}
+                </p>
+              )}
+            </div>
+
+            <div className="rounded-xl bg-slate-50 border border-slate-200 p-3">
+              <div className="mb-1 flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-slate-400">
+                <Target className="h-3.5 w-3.5" />
+                Editorial Signal
+              </div>
+              <p className="text-xs font-bold text-slate-800">
+                {needsReview ? "Needs human review" : "Ready for desk flow"}
+              </p>
+              <p className="mt-1 text-[11px] text-slate-500">
+                {deskStory.story.jumpMerged ? `Jump merged from ${deskStory.story.jumpMerged}` : "No jump continuation flagged"}
+              </p>
+            </div>
+          </div>
+
+          <div className="grid gap-2 md:grid-cols-3" onClick={(event) => event.stopPropagation()}>
+            <label className="space-y-1">
+              <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">Status</span>
+              <select
+                value={workflow.status}
+                onChange={(event) => updateWorkflow(deskStory, { status: event.target.value as StoryStatus })}
+                className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-bold text-slate-700 outline-none focus:border-emerald-400"
+              >
+                {statusOptions.map((status) => (
+                  <option key={status} value={status}>{status}</option>
+                ))}
+              </select>
+            </label>
+            <label className="space-y-1">
+              <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">Priority</span>
+              <select
+                value={workflow.priority}
+                onChange={(event) => updateWorkflow(deskStory, { priority: event.target.value as StoryPriority })}
+                className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-bold text-slate-700 outline-none focus:border-emerald-400"
+              >
+                {priorityOptions.map((priority) => (
+                  <option key={priority} value={priority}>{priority}</option>
+                ))}
+              </select>
+            </label>
+            <label className="space-y-1">
+              <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">Assign</span>
+              <select
+                value={workflow.assignedTo}
+                onChange={(event) => {
+                  const assignedTo = event.target.value;
+                  updateWorkflow(deskStory, {
+                    assignedTo,
+                    status: assignedTo === "Unassigned" ? workflow.status : "Assigned",
+                  });
+                }}
+                className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-bold text-slate-700 outline-none focus:border-emerald-400"
+              >
+                {assigneeOptions.map((assignee) => (
+                  <option key={assignee} value={assignee}>{assignee}</option>
+                ))}
+              </select>
+            </label>
+          </div>
+
+          <label className="space-y-1">
+            <span className="flex items-center gap-1.5 text-[10px] font-black uppercase tracking-widest text-slate-400">
+              <MessageSquare className="h-3.5 w-3.5" />
+              Editor Note
+            </span>
+            <textarea
+              value={workflow.note}
+              onChange={(event) => updateWorkflow(deskStory, { note: event.target.value })}
+              placeholder="Reporter brief, missing fact, follow-up source..."
+              rows={compact ? 2 : 3}
+              className="w-full resize-none rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs leading-relaxed text-slate-700 outline-none focus:border-emerald-400 focus:bg-white"
+            />
+          </label>
+        </div>
+      </article>
+    );
   };
 
   if (!isMounted) {
@@ -764,9 +1264,20 @@ export default function Home() {
         <header className="h-16 border-b flex items-center justify-between px-4 md:px-6 bg-white flex-shrink-0">
           <div className="flex items-center gap-3 min-w-0">
             <h2 className="text-lg font-extrabold text-slate-900 font-sans tracking-tight truncate">
-              {editionMeta?.publicationName || activeSummaryPub.name}
+              {viewMode === "desk" ? "Newsroom Desk" : (editionMeta?.publicationName || activeSummaryPub.name)}
             </h2>
-            {(editionMeta || (activeSummaryPub as any).isDynamic) && (
+            {viewMode === "desk" ? (
+              <div className="hidden sm:flex items-center gap-2">
+                <div className="flex items-center bg-amber-50 text-amber-800 rounded-lg px-2.5 py-1 text-[11px] border border-amber-200 font-bold font-mono">
+                  <Star className="w-3 h-3 mr-1.5 fill-amber-400 text-amber-500" />
+                  Daily Star Baseline
+                </div>
+                <div className="flex items-center bg-slate-100 rounded-lg px-2 py-1 text-[11px] border border-slate-200">
+                  <span className="font-bold text-slate-500 mr-1 uppercase font-mono">Stories:</span>
+                  <span className="text-slate-700 font-medium">{deskStories.length}</span>
+                </div>
+              </div>
+            ) : (editionMeta || (activeSummaryPub as any).isDynamic) && (
               <div className="hidden sm:flex items-center gap-2">
                 <div className="flex items-center bg-slate-100 rounded-lg px-2 py-1 text-[11px] border border-slate-200">
                   <span className="font-bold text-slate-500 mr-1 uppercase font-mono">Date:</span>
@@ -789,6 +1300,18 @@ export default function Home() {
           {/* View Mode Toggle */}
           <div className="flex items-center gap-2">
             <div className="flex bg-slate-100 p-0.5 rounded-lg border border-slate-200">
+              <button
+                onClick={() => setViewMode("desk")}
+                className={cn(
+                  "px-3 py-1.5 text-xs font-bold rounded-md transition-all flex items-center gap-1.5",
+                  viewMode === "desk"
+                    ? "bg-white text-emerald-700 shadow-sm"
+                    : "text-slate-500 hover:text-slate-700"
+                )}
+              >
+                <ClipboardList className="w-3.5 h-3.5" />
+                <span className="hidden sm:inline">Desk</span>
+              </button>
               <button
                 onClick={() => setViewMode("pages")}
                 disabled={!hasUploadedPages}
@@ -840,6 +1363,349 @@ export default function Home() {
             )}
           </div>
         </header>
+
+        {/* ========================================= */}
+        {/* NEWSROOM DESK MODE */}
+        {/* ========================================= */}
+        {viewMode === "desk" && (
+          <div className="flex-1 min-h-0 overflow-y-auto bg-[linear-gradient(135deg,#f8fafc_0%,#eefdf7_45%,#fff7ed_100%)]">
+            <div className="mx-auto flex w-full max-w-7xl flex-col gap-5 p-4 md:p-6">
+              <section className="overflow-hidden rounded-3xl border border-slate-200 bg-slate-950 text-white shadow-xl">
+                <div className="relative p-5 md:p-7">
+                  <div className="absolute inset-0 opacity-30 [background:radial-gradient(circle_at_20%_20%,#10b981_0,transparent_32%),radial-gradient(circle_at_88%_12%,#f59e0b_0,transparent_30%)]" />
+                  <div className="relative grid gap-5 lg:grid-cols-[1.35fr_1fr] lg:items-end">
+                    <div>
+                      <div className="mb-3 inline-flex items-center gap-2 rounded-full border border-emerald-400/30 bg-emerald-400/10 px-3 py-1 text-[11px] font-black uppercase tracking-widest text-emerald-200">
+                        <ClipboardList className="h-3.5 w-3.5" />
+                        Cross-Publication Newsroom
+                      </div>
+                      <h1 className="max-w-3xl text-2xl font-black tracking-tight md:text-4xl">
+                        One desk for every story, with The Daily Star as the baseline.
+                      </h1>
+                      <p className="mt-3 max-w-2xl text-sm leading-relaxed text-slate-300 md:text-base">
+                        Editors can scan all publications together, compare angles against Daily Star, assign reporters, and push low-confidence or jump-merged stories into review.
+                      </p>
+                    </div>
+                    <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-2">
+                      {[
+                        { label: "All Stories", value: deskStories.length, icon: Newspaper },
+                        { label: "Daily Star", value: dailyStarStoryCount, icon: Star },
+                        { label: "Matched", value: totalMatches, icon: GitCompare },
+                        { label: "Review", value: needsReviewCount, icon: AlertTriangle },
+                      ].map((metric) => (
+                        <div key={metric.label} className="rounded-2xl border border-white/10 bg-white/8 p-4 backdrop-blur">
+                          <div className="mb-2 flex items-center justify-between text-slate-300">
+                            <span className="text-[10px] font-black uppercase tracking-widest">{metric.label}</span>
+                            <metric.icon className="h-4 w-4 text-emerald-300" />
+                          </div>
+                          <div className="font-mono text-2xl font-black text-white">{metric.value}</div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              </section>
+
+              <section className="rounded-3xl border border-slate-200 bg-white/90 p-3 shadow-sm backdrop-blur md:p-4">
+                <div className="grid gap-3 lg:grid-cols-[1.4fr_0.7fr_0.7fr_0.7fr]">
+                  <label className="relative">
+                    <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                    <input
+                      value={deskSearch}
+                      onChange={(event) => setDeskSearch(event.target.value)}
+                      placeholder="Search Bangla/English title, category, summary, page..."
+                      className="h-11 w-full rounded-2xl border border-slate-200 bg-slate-50 pl-10 pr-3 text-sm font-semibold text-slate-800 outline-none transition focus:border-emerald-400 focus:bg-white"
+                    />
+                  </label>
+                  <label className="relative">
+                    <Filter className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                    <select
+                      value={deskPublicationFilter}
+                      onChange={(event) => setDeskPublicationFilter(event.target.value)}
+                      className="h-11 w-full rounded-2xl border border-slate-200 bg-slate-50 pl-10 pr-3 text-sm font-bold text-slate-700 outline-none focus:border-emerald-400 focus:bg-white"
+                    >
+                      <option value="all">All publications</option>
+                      {deskPublications.map((publication) => (
+                        <option key={`${publication.id}-${publication.date}`} value={publication.id}>
+                          {publication.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <select
+                    value={deskPriorityFilter}
+                    onChange={(event) => setDeskPriorityFilter(event.target.value as StoryPriority | "all")}
+                    className="h-11 rounded-2xl border border-slate-200 bg-slate-50 px-3 text-sm font-bold text-slate-700 outline-none focus:border-emerald-400 focus:bg-white"
+                  >
+                    <option value="all">All priorities</option>
+                    {priorityOptions.map((priority) => (
+                      <option key={priority} value={priority}>{priority}</option>
+                    ))}
+                  </select>
+                  <select
+                    value={deskStatusFilter}
+                    onChange={(event) => setDeskStatusFilter(event.target.value as StoryStatus | "all")}
+                    className="h-11 rounded-2xl border border-slate-200 bg-slate-50 px-3 text-sm font-bold text-slate-700 outline-none focus:border-emerald-400 focus:bg-white"
+                  >
+                    <option value="all">All status</option>
+                    {statusOptions.map((status) => (
+                      <option key={status} value={status}>{status}</option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="mt-3 flex gap-2 overflow-x-auto pb-1">
+                  {deskTabs.map((tab) => (
+                    <button
+                      key={tab.id}
+                      type="button"
+                      onClick={() => setDeskTab(tab.id)}
+                      className={cn(
+                        "flex shrink-0 items-center gap-2 rounded-2xl px-4 py-2 text-xs font-black uppercase tracking-wider transition",
+                        deskTab === tab.id
+                          ? "bg-slate-950 text-white shadow-sm"
+                          : "bg-slate-100 text-slate-600 hover:bg-slate-200 hover:text-slate-900"
+                      )}
+                    >
+                      <tab.icon className="h-4 w-4" />
+                      {tab.label}
+                    </button>
+                  ))}
+                </div>
+              </section>
+
+              {deskTab === "top" && (
+                <section className="grid gap-4 xl:grid-cols-[1fr_360px]">
+                  <div className="space-y-4">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <h2 className="text-xl font-black tracking-tight text-slate-950">Top Stories Across Publications</h2>
+                        <p className="text-sm text-slate-500">Sorted by priority, workflow status, and Daily Star comparison strength.</p>
+                      </div>
+                      <span className="rounded-full bg-white px-3 py-1 text-xs font-black text-slate-500 shadow-sm">
+                        {filteredDeskStories.length} visible
+                      </span>
+                    </div>
+                    {filteredDeskStories.length > 0 ? (
+                      <div className="space-y-4">
+                        {filteredDeskStories.map((deskStory) => renderDeskStoryCard(deskStory))}
+                      </div>
+                    ) : (
+                      <div className="rounded-3xl border border-dashed border-slate-300 bg-white p-10 text-center">
+                        <Search className="mx-auto mb-3 h-10 w-10 text-slate-300" />
+                        <h3 className="font-black text-slate-900">No stories match this filter</h3>
+                        <p className="mt-1 text-sm text-slate-500">Try clearing search, publication, priority, or status filters.</p>
+                      </div>
+                    )}
+                  </div>
+
+                  <aside className="space-y-4">
+                    <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
+                      <div className="mb-4 flex items-center gap-2">
+                        <AlertTriangle className="h-5 w-5 text-rose-500" />
+                        <h3 className="font-black text-slate-950">Fast Review Queue</h3>
+                      </div>
+                      <div className="space-y-3">
+                        {reviewQueueStories.slice(0, 4).map((deskStory) => (
+                          <button
+                            key={deskStory.id}
+                            type="button"
+                            onClick={() => setSelectedStory(deskStory.story)}
+                            className="w-full rounded-2xl border border-slate-200 bg-slate-50 p-3 text-left transition hover:border-rose-200 hover:bg-rose-50"
+                          >
+                            <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">
+                              {deskStory.publicationName} • {deskStory.story.originPage}
+                            </p>
+                            <p className="mt-1 line-clamp-2 text-sm font-black leading-snug text-slate-900">
+                              {deskStory.story.title}
+                            </p>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
+                      <div className="mb-4 flex items-center gap-2">
+                        <Users className="h-5 w-5 text-emerald-600" />
+                        <h3 className="font-black text-slate-950">Assigned Work</h3>
+                      </div>
+                      <div className="space-y-3">
+                        {assignedStories.length > 0 ? assignedStories.slice(0, 5).map((deskStory) => {
+                          const workflow = getWorkflow(deskStory);
+                          return (
+                            <div key={deskStory.id} className="rounded-2xl bg-emerald-50/70 p-3">
+                              <p className="text-[10px] font-black uppercase tracking-widest text-emerald-700">{workflow.assignedTo}</p>
+                              <p className="mt-1 line-clamp-2 text-sm font-black text-slate-900">{deskStory.story.title}</p>
+                            </div>
+                          );
+                        }) : (
+                          <p className="rounded-2xl bg-slate-50 p-4 text-sm font-semibold text-slate-500">
+                            No reporter assignments yet. Assign from any story card.
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  </aside>
+                </section>
+              )}
+
+              {deskTab === "clusters" && (
+                <section className="space-y-4">
+                  <div>
+                    <h2 className="text-xl font-black tracking-tight text-slate-950">Daily Star Anchored Story Clusters</h2>
+                    <p className="text-sm text-slate-500">Each cluster starts from The Daily Star, then shows related angles from other publications.</p>
+                  </div>
+                  <div className="grid gap-4">
+                    {storyClusters.map((cluster) => (
+                      <div key={cluster.anchor.id} className="rounded-3xl border border-amber-200 bg-white p-5 shadow-sm">
+                        <div className="mb-4 rounded-2xl bg-amber-50 p-4">
+                          <p className="mb-1 flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-amber-700">
+                            <Star className="h-3.5 w-3.5 fill-amber-400" />
+                            Daily Star Baseline
+                          </p>
+                          <h3 className="text-lg font-black leading-tight text-slate-950">{cluster.anchor.story.title}</h3>
+                          <p className="mt-2 line-clamp-2 text-sm leading-relaxed text-slate-600">{cluster.anchor.story.summary}</p>
+                        </div>
+                        {cluster.matches.length > 0 ? (
+                          <div className="grid gap-3 md:grid-cols-2">
+                            {cluster.matches.map((deskStory) => renderDeskStoryCard(deskStory, true))}
+                          </div>
+                        ) : (
+                          <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-4 text-sm font-semibold text-slate-500">
+                            No related story from other publications yet.
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                    {uniqueNonBaselineStories.length > 0 && (
+                      <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
+                        <div className="mb-4">
+                          <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Unique Angles</p>
+                          <h3 className="text-lg font-black text-slate-950">Stories not strongly covered by Daily Star</h3>
+                        </div>
+                        <div className="grid gap-3 md:grid-cols-2">
+                          {uniqueNonBaselineStories.map((deskStory) => renderDeskStoryCard(deskStory, true))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </section>
+              )}
+
+              {deskTab === "assignments" && (
+                <section className="space-y-4">
+                  <div>
+                    <h2 className="text-xl font-black tracking-tight text-slate-950">Reporter Assignment Board</h2>
+                    <p className="text-sm text-slate-500">Desk-wise work queue. Assignments stay saved in this browser until backend workflow tables are added.</p>
+                  </div>
+                  <div className="grid gap-4 lg:grid-cols-2">
+                    {assigneeOptions.map((assignee) => {
+                      const storiesForAssignee = filteredDeskStories.filter((deskStory) => getWorkflow(deskStory).assignedTo === assignee);
+                      return (
+                        <div key={assignee} className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
+                          <div className="mb-4 flex items-center justify-between">
+                            <div className="flex items-center gap-2">
+                              <Users className="h-5 w-5 text-emerald-600" />
+                              <h3 className="font-black text-slate-950">{assignee}</h3>
+                            </div>
+                            <span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-black text-slate-500">
+                              {storiesForAssignee.length}
+                            </span>
+                          </div>
+                          <div className="space-y-3">
+                            {storiesForAssignee.length > 0 ? storiesForAssignee.map((deskStory) => renderDeskStoryCard(deskStory, true)) : (
+                              <p className="rounded-2xl bg-slate-50 p-4 text-sm font-semibold text-slate-500">
+                                No stories in this lane.
+                              </p>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </section>
+              )}
+
+              {deskTab === "review" && (
+                <section className="space-y-4">
+                  <div>
+                    <h2 className="text-xl font-black tracking-tight text-slate-950">Quality And Trust Review Queue</h2>
+                    <p className="text-sm text-slate-500">Jump-merged, new, and weakly matched stories come here first so editors can verify context.</p>
+                  </div>
+                  <div className="grid gap-4 lg:grid-cols-2">
+                    {reviewQueueStories.length > 0 ? reviewQueueStories.map((deskStory) => renderDeskStoryCard(deskStory)) : (
+                      <div className="rounded-3xl border border-emerald-200 bg-emerald-50 p-8 text-center lg:col-span-2">
+                        <CheckCircle2 className="mx-auto mb-3 h-10 w-10 text-emerald-600" />
+                        <h3 className="font-black text-emerald-950">Review queue is clear</h3>
+                        <p className="mt-1 text-sm font-semibold text-emerald-700">No filtered story currently needs manual attention.</p>
+                      </div>
+                    )}
+                  </div>
+                </section>
+              )}
+
+              {deskTab === "publications" && (
+                <section className="space-y-4">
+                  <div>
+                    <h2 className="text-xl font-black tracking-tight text-slate-950">Publication Comparison Matrix</h2>
+                    <p className="text-sm text-slate-500">Daily Star is treated as the main reference; other publications show match rate and unique angles.</p>
+                  </div>
+                  <div className="grid gap-4 lg:grid-cols-3">
+                    {publicationScorecards.map((scorecard) => (
+                      <div
+                        key={`${scorecard.publication.id}-${scorecard.publication.date}`}
+                        className={cn(
+                          "rounded-3xl border bg-white p-5 shadow-sm",
+                          scorecard.publication.id === MAIN_PUBLICATION_ID ? "border-amber-200 ring-1 ring-amber-100" : "border-slate-200"
+                        )}
+                      >
+                        <div className="mb-4 flex items-start justify-between gap-3">
+                          <div>
+                            <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">{scorecard.publication.date}</p>
+                            <h3 className="mt-1 text-lg font-black leading-tight text-slate-950">{scorecard.publication.name}</h3>
+                            <p className="mt-1 text-xs font-semibold text-slate-500">{scorecard.publication.edition}</p>
+                          </div>
+                          {scorecard.publication.id === MAIN_PUBLICATION_ID && (
+                            <span className="rounded-full bg-amber-50 px-2.5 py-1 text-[10px] font-black uppercase tracking-widest text-amber-700">
+                              Baseline
+                            </span>
+                          )}
+                        </div>
+                        <div className="grid grid-cols-2 gap-3">
+                          <div className="rounded-2xl bg-slate-50 p-3">
+                            <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Stories</p>
+                            <p className="mt-1 font-mono text-2xl font-black text-slate-950">{scorecard.storyCount}</p>
+                          </div>
+                          <div className="rounded-2xl bg-emerald-50 p-3">
+                            <p className="text-[10px] font-black uppercase tracking-widest text-emerald-700">Match Rate</p>
+                            <p className="mt-1 font-mono text-2xl font-black text-emerald-900">{scorecard.matchRate}%</p>
+                          </div>
+                          <div className="rounded-2xl bg-amber-50 p-3">
+                            <p className="text-[10px] font-black uppercase tracking-widest text-amber-700">High Priority</p>
+                            <p className="mt-1 font-mono text-2xl font-black text-amber-900">{scorecard.highPriorityStories}</p>
+                          </div>
+                          <div className="rounded-2xl bg-rose-50 p-3">
+                            <p className="text-[10px] font-black uppercase tracking-widest text-rose-700">Unique</p>
+                            <p className="mt-1 font-mono text-2xl font-black text-rose-900">{scorecard.uniqueStories}</p>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </section>
+              )}
+
+              <div className="rounded-3xl border border-slate-200 bg-white/80 p-4 text-xs leading-relaxed text-slate-500">
+                <div className="flex items-start gap-2">
+                  <Clock3 className="mt-0.5 h-4 w-4 shrink-0 text-slate-400" />
+                  <p>
+                    Frontend-only mode: status, priority, assignment, and notes are saved in this browser&apos;s localStorage. Backend tables can later make this shared across the full team.
+                  </p>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* ========================================= */}
         {/* PAGE VIEWER MODE */}
