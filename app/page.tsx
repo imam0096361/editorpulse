@@ -947,6 +947,15 @@ export default function Home() {
       );
     });
 
+  const groupedPublicationSections = deskPublications
+    .slice()
+    .sort((a, b) => Number(isDailyStarPublication(b.id, b.name)) - Number(isDailyStarPublication(a.id, a.name)))
+    .map((publication) => ({
+      publication,
+      stories: filteredDeskStories.filter((deskStory) => deskStory.publicationId === publication.id),
+    }))
+    .filter((section) => section.stories.length > 0);
+
   const storyClusters: StoryCluster[] = baselineStories.map((anchor) => ({
     anchor,
     matches: filteredDeskStories
@@ -1646,7 +1655,10 @@ export default function Home() {
                       value={deskDate || ""}
                       onChange={(event) => {
                         setDeskDate(event.target.value || null);
+                        setDeskSearch("");
                         setDeskPublicationFilter("all");
+                        setDeskPriorityFilter("all");
+                        setDeskStatusFilter("all");
                       }}
                       className="h-11 w-full rounded-2xl border border-slate-200 bg-slate-50 pl-10 pr-3 text-sm font-bold text-slate-700 outline-none focus:border-emerald-400 focus:bg-white"
                     >
@@ -1743,22 +1755,59 @@ export default function Home() {
                   <div className="space-y-4">
                     <div className="flex items-center justify-between">
                       <div>
-                        <h2 className="text-xl font-black tracking-tight text-slate-950">Top Stories Across Publications</h2>
-                        <p className="text-sm text-slate-500">Sorted by priority, workflow status, and Daily Star comparison strength.</p>
+                        <h2 className="text-xl font-black tracking-tight text-slate-950">All News For {deskDate || "Selected Date"}</h2>
+                        <p className="text-sm text-slate-500">Publications are separated by date, with The Daily Star first as the baseline.</p>
                       </div>
                       <span className="rounded-full bg-white px-3 py-1 text-xs font-black text-slate-500 shadow-sm">
                         {filteredDeskStories.length} visible
                       </span>
                     </div>
-                    {filteredDeskStories.length > 0 ? (
+
+                    {groupedPublicationSections.length > 0 ? (
                       <div className="space-y-4">
-                        {filteredDeskStories.map((deskStory) => renderDeskStoryCard(deskStory))}
+                        {groupedPublicationSections.map((section) => {
+                          const isBaselineSection = isDailyStarPublication(section.publication.id, section.publication.name);
+                          return (
+                            <div
+                              key={`${section.publication.id}-${section.publication.date}`}
+                              className={cn(
+                                "rounded-3xl border bg-white p-4 shadow-sm md:p-5",
+                                isBaselineSection ? "border-amber-200 ring-1 ring-amber-100" : "border-slate-200"
+                              )}
+                            >
+                              <div className="mb-4 flex flex-col gap-2 border-b border-slate-100 pb-4 md:flex-row md:items-center md:justify-between">
+                                <div>
+                                  <div className="flex flex-wrap items-center gap-2">
+                                    <h3 className="text-lg font-black leading-tight text-slate-950">
+                                      {section.publication.name}
+                                    </h3>
+                                    {isBaselineSection && (
+                                      <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2.5 py-1 text-[10px] font-black uppercase tracking-widest text-amber-700">
+                                        <Star className="h-3 w-3 fill-amber-400 text-amber-500" />
+                                        Baseline
+                                      </span>
+                                    )}
+                                  </div>
+                                  <p className="mt-1 text-xs font-semibold text-slate-500">
+                                    {section.publication.date} • {section.publication.edition}
+                                  </p>
+                                </div>
+                                <span className="w-fit rounded-full bg-slate-100 px-3 py-1 text-xs font-black text-slate-600">
+                                  {section.stories.length} news
+                                </span>
+                              </div>
+                              <div className="space-y-3">
+                                {section.stories.map((deskStory) => renderDeskStoryCard(deskStory))}
+                              </div>
+                            </div>
+                          );
+                        })}
                       </div>
                     ) : (
                       <div className="rounded-3xl border border-dashed border-slate-300 bg-white p-10 text-center">
                         <Search className="mx-auto mb-3 h-10 w-10 text-slate-300" />
-                        <h3 className="font-black text-slate-900">No stories match this filter</h3>
-                        <p className="mt-1 text-sm text-slate-500">Try clearing search, publication, priority, or status filters.</p>
+                        <h3 className="font-black text-slate-900">No news found for this date</h3>
+                        <p className="mt-1 text-sm text-slate-500">Select a date that has OCR summaries, or clear search and workflow filters.</p>
                       </div>
                     )}
                   </div>
