@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useRef, useEffect, useCallback } from "react";
+import React, { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import {
   Newspaper,
@@ -83,7 +83,7 @@ interface PublicationGroup {
 }
 
 type ViewMode = "desk" | "pages" | "summary";
-type DeskTab = "top" | "clusters" | "assignments" | "review" | "publications";
+type DeskTab = "top" | "clusters" | "gaps" | "assignments" | "review" | "publications";
 type StoryStatus = "New" | "Reviewed" | "Assigned" | "In Progress" | "Published" | "Archived";
 type StoryPriority = "Breaking" | "High" | "Normal" | "Low";
 type StorySection = "frontPage" | "pageThree" | "backPage";
@@ -105,6 +105,11 @@ interface NewsDeskStory {
   mainMatchTitle?: string;
 }
 
+interface StoryMatch {
+  story: NewsDeskStory;
+  score: number;
+}
+
 interface StoryWorkflowState {
   status: StoryStatus;
   priority: StoryPriority;
@@ -124,6 +129,7 @@ const WORKFLOW_STORAGE_KEY = "editorpulse-newsdesk-workflow-v1";
 const deskTabs: { id: DeskTab; label: string; icon: React.ElementType }[] = [
   { id: "top", label: "Top Stories", icon: Star },
   { id: "clusters", label: "Clusters", icon: GitCompare },
+  { id: "gaps", label: "Daily Star Gaps", icon: AlertTriangle },
   { id: "assignments", label: "Assignments", icon: Users },
   { id: "review", label: "Review Queue", icon: AlertTriangle },
   { id: "publications", label: "Publications", icon: Newspaper },
@@ -162,6 +168,34 @@ const normalizeText = (value: string) =>
     .replace(/\s+/g, " ")
     .trim();
 
+const isDailyStarPublication = (id: string, name: string) => {
+  const normalizedId = normalizeText(id).replace(/\s+/g, "-");
+  const normalizedName = normalizeText(name);
+  return normalizedId.includes("daily-star") || normalizedName.includes("daily star");
+};
+
+const conceptLexicon: Record<string, string[]> = {
+  economy: ["economy", "economic", "inflation", "price", "prices", "market", "import", "currency", "reserve", "bank", "মূল্যস্ফীতি", "দাম", "বাজার", "আমদানি", "মুদ্রা", "রিজার্ভ", "ব্যাংক"],
+  politics: ["government", "minister", "cabinet", "parliament", "election", "policy", "law", "prime", "secretariat", "সরকার", "মন্ত্রী", "মন্ত্রিসভা", "সংসদ", "নির্বাচন", "নীতি", "আইন", "প্রধানমন্ত্রী"],
+  energy: ["energy", "renewable", "solar", "wind", "grid", "power", "electricity", "জ্বালানি", "বিদ্যুৎ", "সৌর", "নবায়নযোগ্য", "গ্রিড"],
+  tax: ["tax", "revenue", "nbr", "filing", "custom", "vat", "কর", "রাজস্ব", "এনবিআর", "ভ্যাট", "শুল্ক"],
+  labour: ["labour", "labor", "worker", "wage", "garment", "rmg", "factory", "শ্রমিক", "মজুরি", "পোশাক", "কারখানা"],
+  city: ["city", "metro", "dhaka", "water", "wasa", "housing", "flat", "rehabilitation", "capital", "ঢাকা", "রাজধানী", "ওয়াসা", "পানি", "আবাসন", "ফ্ল্যাট", "পুনর্বাসন"],
+  sports: ["sports", "cricket", "team", "camp", "training", "match", "world cup", "semifinal", "খেলা", "খেলাধুলা", "ক্রীড়া", "ক্রিকেট", "দল", "বিশ্বকাপ", "সেমিফাইনাল"],
+  education: ["school", "university", "student", "teacher", "exam", "education", "শিক্ষা", "বিদ্যালয়", "বিশ্ববিদ্যালয়", "শিক্ষার্থী", "পরীক্ষা"],
+  crime: ["crime", "police", "court", "case", "arrest", "mobile court", "পুলিশ", "আদালত", "মামলা", "গ্রেপ্তার", "মোবাইল কোর্ট"],
+  climate: ["climate", "weather", "flood", "cyclone", "coastal", "rain", "জলবায়ু", "আবহাওয়া", "বন্যা", "ঘূর্ণিঝড়", "উপকূল", "বৃষ্টি"],
+};
+
+const getStoryConcepts = (story: NewsStory) => {
+  const text = normalizeText(`${story.title} ${story.subheadline || ""} ${story.category} ${story.summary}`);
+  return new Set(
+    Object.entries(conceptLexicon)
+      .filter(([, terms]) => terms.some((term) => text.includes(normalizeText(term))))
+      .map(([concept]) => concept)
+  );
+};
+
 const tokenizeStory = (story: NewsStory) => {
   const stopWords = new Set([
     "the", "and", "for", "with", "from", "that", "this", "will", "into", "amid", "news",
@@ -177,14 +211,30 @@ const tokenizeStory = (story: NewsStory) => {
 const getSimilarityScore = (story: NewsStory, baseline: NewsStory) => {
   const left = tokenizeStory(story);
   const right = tokenizeStory(baseline);
-  if (left.size === 0 || right.size === 0) return 0;
 
   let overlap = 0;
   left.forEach((token) => {
     if (right.has(token)) overlap += 1;
   });
 
-  return Math.round((overlap / Math.max(Math.min(left.size, right.size), 1)) * 100);
+  const tokenScore = left.size === 0 || right.size === 0
+    ? 0
+    : (overlap / Math.max(Math.min(left.size, right.size), 1)) * 100;
+
+  const leftConcepts = getStoryConcepts(story);
+  const rightConcepts = getStoryConcepts(baseline);
+  let conceptOverlap = 0;
+  leftConcepts.forEach((concept) => {
+    if (rightConcepts.has(concept)) conceptOverlap += 1;
+  });
+
+  const conceptScore = leftConcepts.size === 0 || rightConcepts.size === 0
+    ? 0
+    : (conceptOverlap / Math.max(Math.min(leftConcepts.size, rightConcepts.size), 1)) * 100;
+  const categoryBoost = normalizeText(story.category) === normalizeText(baseline.category) ? 10 : 0;
+  const pageBoost = story.originPage === baseline.originPage ? 4 : 0;
+
+  return Math.min(100, Math.round((tokenScore * 0.55) + (conceptScore * 0.4) + categoryBoost + pageBoost));
 };
 
 const slugify = (value: string) =>
@@ -214,6 +264,13 @@ const isNeedsReview = (deskStory: NewsDeskStory, workflow: StoryWorkflowState) =
   Boolean(deskStory.story.jumpMerged) ||
   (!deskStory.isMainPublication && deskStory.comparisonScore < 18);
 
+const isImportantDeskStory = (deskStory: NewsDeskStory, workflow: StoryWorkflowState) =>
+  workflow.priority === "Breaking" ||
+  workflow.priority === "High" ||
+  deskStory.section === "frontPage" ||
+  normalizeText(deskStory.story.category).includes("lead") ||
+  deskStory.story.category.includes("গুরুত্বপূর্ণ");
+
 const getPublicationStories = (publication: Publication): NewsDeskStory[] => {
   const sections: { key: StorySection; stories: NewsStory[] }[] = [
     { key: "frontPage", stories: publication.frontPage || [] },
@@ -232,9 +289,9 @@ const getPublicationStories = (publication: Publication): NewsDeskStory[] => {
       pageCount: publication.pageCount,
       section: key,
       sectionLabel: sectionLabels[key],
-      isMainPublication: publication.id === MAIN_PUBLICATION_ID,
-      comparisonScore: publication.id === MAIN_PUBLICATION_ID ? 100 : 0,
-      comparisonLabel: publication.id === MAIN_PUBLICATION_ID ? "Daily Star baseline" : "Not compared",
+      isMainPublication: isDailyStarPublication(publication.id, publication.name),
+      comparisonScore: isDailyStarPublication(publication.id, publication.name) ? 100 : 0,
+      comparisonLabel: isDailyStarPublication(publication.id, publication.name) ? "Daily Star baseline" : "Not compared",
     }))
   );
 };
@@ -405,9 +462,13 @@ export default function Home() {
   const [viewMode, setViewMode] = useState<ViewMode>("desk");
   const [deskTab, setDeskTab] = useState<DeskTab>("top");
   const [deskSearch, setDeskSearch] = useState("");
+  const [deskDate, setDeskDate] = useState<string | null>(null);
   const [deskPublicationFilter, setDeskPublicationFilter] = useState("all");
   const [deskPriorityFilter, setDeskPriorityFilter] = useState<StoryPriority | "all">("all");
   const [deskStatusFilter, setDeskStatusFilter] = useState<StoryStatus | "all">("all");
+  const [deskEditionDetails, setDeskEditionDetails] = useState<Publication[]>([]);
+  const [isLoadingDeskEditions, setIsLoadingDeskEditions] = useState(false);
+  const [deskLoadError, setDeskLoadError] = useState<string | null>(null);
   const [workflowByStoryId, setWorkflowByStoryId] = useState<Record<string, StoryWorkflowState>>(() => {
     if (typeof window === "undefined") return {};
 
@@ -543,6 +604,102 @@ export default function Home() {
     fetchPublications();
   }, [fetchPublications]);
 
+  const uploadedEditionOptions = useMemo(() => uploadedPubs.flatMap((publication) =>
+    publication.editions.map((edition) => ({
+      ...edition,
+      publicationGroupId: publication.id,
+      publicationGroupName: publication.name,
+    }))
+  ), [uploadedPubs]);
+
+  const deskDateOptions = useMemo(() => Array.from(new Set([
+    ...uploadedEditionOptions.map((edition) => edition.date),
+    ...summaryPublications.map((publication) => publication.date),
+  ])).sort((a, b) => b.localeCompare(a)), [uploadedEditionOptions]);
+
+  const deskDateOptionsKey = deskDateOptions.join("|");
+
+  useEffect(() => {
+    if (deskDate || deskDateOptions.length === 0) return;
+
+    const dateWithDailyStar = deskDateOptions.find((date) => {
+      const editionsForDate = uploadedEditionOptions.filter((edition) => edition.date === date);
+      return editionsForDate.some((edition) => isDailyStarPublication(edition.publicationId, edition.publicationName)) &&
+        editionsForDate.length > 1;
+    });
+
+    setDeskDate(dateWithDailyStar || selectedDate || deskDateOptions[0]);
+  }, [deskDate, deskDateOptions, deskDateOptionsKey, selectedDate, uploadedEditionOptions]);
+
+  useEffect(() => {
+    if (!deskDate) {
+      setDeskEditionDetails([]);
+      return;
+    }
+
+    const editionsForDate = uploadedEditionOptions.filter((edition) => edition.date === deskDate);
+    if (editionsForDate.length === 0) {
+      setDeskEditionDetails([]);
+      setDeskLoadError(null);
+      return;
+    }
+
+    let isCancelled = false;
+    setIsLoadingDeskEditions(true);
+    setDeskLoadError(null);
+
+    Promise.allSettled(
+      editionsForDate.map(async (edition) => {
+        const res = await fetch(`/api/editions/${encodeURIComponent(edition.publicationId)}/${encodeURIComponent(edition.date)}`, {
+          cache: "no-store",
+        });
+        if (!res.ok) {
+          throw new Error(`${edition.publicationName} failed to load`);
+        }
+        const data: EditionInfo = await res.json();
+        return {
+          id: data.publicationId,
+          name: data.publicationName,
+          date: data.date,
+          edition: data.edition || "Standard Edition",
+          pageCount: data.pageCount || data.pages?.length || 0,
+          frontPage: data.frontPage || [],
+          pageThree: data.pageThree || [],
+          backPage: data.backPage || [],
+          ocrConfidence: data.ocrConfidence || 95,
+        } satisfies Publication;
+      })
+    )
+      .then((results) => {
+        if (isCancelled) return;
+        const loadedPublications = results
+          .filter((result): result is PromiseFulfilledResult<Publication> => result.status === "fulfilled")
+          .map((result) => result.value)
+          .filter((publication) => (
+            publication.frontPage.length > 0 ||
+            publication.pageThree.length > 0 ||
+            publication.backPage.length > 0
+          ));
+
+        setDeskEditionDetails(loadedPublications);
+        const failedCount = results.filter((result) => result.status === "rejected").length;
+        setDeskLoadError(failedCount > 0 ? `${failedCount} publication could not be loaded for comparison.` : null);
+      })
+      .catch((error) => {
+        if (!isCancelled) {
+          setDeskEditionDetails([]);
+          setDeskLoadError(error instanceof Error ? error.message : "Failed to load newsroom editions.");
+        }
+      })
+      .finally(() => {
+        if (!isCancelled) setIsLoadingDeskEditions(false);
+      });
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [deskDate, uploadedEditionOptions]);
+
   // Fetch edition pages when a publication+date is selected
   const fetchEditionPages = useCallback(async (pubId: string, date: string) => {
     setIsLoadingPages(true);
@@ -676,23 +833,39 @@ export default function Home() {
       }
     : null;
 
-  const deskPublications = dynamicSummaryPublication
-    ? [
-        dynamicSummaryPublication,
-        ...summaryPublications.filter((publication) => (
-          publication.id !== dynamicSummaryPublication.id || publication.date !== dynamicSummaryPublication.date
-        )),
-      ]
+  const sameDateSummaryPublications = deskDate
+    ? summaryPublications.filter((publication) => publication.date === deskDate)
     : summaryPublications;
 
+  const deskPublications = deskEditionDetails.length > 0
+    ? deskEditionDetails
+    : sameDateSummaryPublications.length >= 2
+      ? sameDateSummaryPublications
+      : dynamicSummaryPublication
+        ? [
+            dynamicSummaryPublication,
+            ...summaryPublications.filter((publication) => (
+              publication.id !== dynamicSummaryPublication.id || publication.date !== dynamicSummaryPublication.date
+            )),
+          ]
+        : summaryPublications;
+
   const baselineStories = deskPublications
-    .filter((publication) => publication.id === MAIN_PUBLICATION_ID)
+    .filter((publication) => isDailyStarPublication(publication.id, publication.name))
     .flatMap(getPublicationStories);
 
   const deskStories = deskPublications
     .flatMap(getPublicationStories)
     .map((deskStory) => {
       if (deskStory.isMainPublication) return deskStory;
+
+      if (baselineStories.length === 0) {
+        return {
+          ...deskStory,
+          comparisonScore: 0,
+          comparisonLabel: "Daily Star edition missing",
+        };
+      }
 
       const bestMatch = baselineStories.reduce<NewsDeskStory | null>((currentBest, baselineStory) => {
         const score = getSimilarityScore(deskStory.story, baselineStory.story);
@@ -707,7 +880,7 @@ export default function Home() {
         ? "Strong Daily Star match"
         : comparisonScore >= 18
           ? "Related angle"
-          : "Unique local angle";
+          : "Not in Daily Star";
 
       return {
         ...deskStory,
@@ -783,6 +956,32 @@ export default function Home() {
     !deskStory.isMainPublication && (!deskStory.mainMatchId || deskStory.comparisonScore < 18)
   ));
 
+  const peerMatchesByStoryId = new Map<string, StoryMatch[]>(
+    deskStories.map((deskStory) => [
+      deskStory.id,
+      deskStories
+        .filter((candidate) => (
+          candidate.id !== deskStory.id &&
+          candidate.publicationId !== deskStory.publicationId
+        ))
+        .map((candidate) => ({
+          story: candidate,
+          score: getSimilarityScore(deskStory.story, candidate.story),
+        }))
+        .filter((match) => match.score >= 18)
+        .sort((a, b) => b.score - a.score),
+    ])
+  );
+
+  const coverageGapStories = filteredDeskStories.filter((deskStory) => {
+    const workflow = getWorkflow(deskStory);
+    const peerMatches = peerMatchesByStoryId.get(deskStory.id) || [];
+    return !deskStory.isMainPublication &&
+      deskStory.comparisonScore < 18 &&
+      isImportantDeskStory(deskStory, workflow) &&
+      (peerMatches.length > 0 || workflow.priority === "Breaking" || workflow.priority === "High");
+  });
+
   const reviewQueueStories = filteredDeskStories.filter((deskStory) => (
     isNeedsReview(deskStory, getWorkflow(deskStory))
   ));
@@ -792,6 +991,7 @@ export default function Home() {
   const totalMatches = deskStories.filter((deskStory) => !deskStory.isMainPublication && deskStory.comparisonScore >= 18).length;
   const dailyStarStoryCount = deskStories.filter((deskStory) => deskStory.isMainPublication).length;
   const needsReviewCount = deskStories.filter((deskStory) => isNeedsReview(deskStory, getWorkflow(deskStory))).length;
+  const hasDailyStarBaseline = dailyStarStoryCount > 0;
 
   const publicationScorecards = deskPublications.map((publication) => {
     const publicationStories = deskStories.filter((deskStory) => deskStory.publicationId === publication.id);
@@ -949,6 +1149,7 @@ export default function Home() {
   const renderDeskStoryCard = (deskStory: NewsDeskStory, compact = false) => {
     const workflow = getWorkflow(deskStory);
     const needsReview = isNeedsReview(deskStory, workflow);
+    const peerMatches = peerMatchesByStoryId.get(deskStory.id) || [];
 
     return (
       <article
@@ -1026,16 +1227,26 @@ export default function Home() {
             <div className="rounded-xl bg-slate-50 border border-slate-200 p-3">
               <div className="mb-1 flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-slate-400">
                 <Target className="h-3.5 w-3.5" />
-                Editorial Signal
+                Other Publications
               </div>
               <p className="text-xs font-bold text-slate-800">
-                {needsReview ? "Needs human review" : "Ready for desk flow"}
+                {peerMatches.length > 0
+                  ? `${peerMatches.length} related story${peerMatches.length === 1 ? "" : "ies"} found`
+                  : "No related story found"}
               </p>
-              <p className="mt-1 text-[11px] text-slate-500">
-                {deskStory.story.jumpMerged ? `Jump merged from ${deskStory.story.jumpMerged}` : "No jump continuation flagged"}
+              <p className="mt-1 text-[11px] text-slate-500 line-clamp-2">
+                {peerMatches[0]
+                  ? `${peerMatches[0].story.publicationName}: ${peerMatches[0].story.story.title}`
+                  : (needsReview ? "Needs human review" : "Ready for desk flow")}
               </p>
             </div>
           </div>
+
+          {deskStory.story.jumpMerged && !compact && (
+            <div className="rounded-xl border border-blue-100 bg-blue-50 px-3 py-2 text-[11px] font-bold text-blue-700">
+              Jump merged from {deskStory.story.jumpMerged}
+            </div>
+          )}
 
           <div className="grid gap-2 md:grid-cols-3" onClick={(event) => event.stopPropagation()}>
             <label className="space-y-1">
@@ -1174,6 +1385,7 @@ export default function Home() {
                   onClick={() => {
                     setSelectedPubId(pub.id);
                     setSelectedDate(null);
+                    if (pub.editions[0]?.date) setDeskDate(pub.editions[0].date);
                     setMobileMenuOpen(false);
                     setViewMode("summary");
                     setActiveColumnTab("front");
@@ -1214,6 +1426,7 @@ export default function Home() {
                         key={ed.date}
                         onClick={() => {
                           setSelectedDate(ed.date);
+                          setDeskDate(ed.date);
                           setViewMode("summary");
                           setActiveColumnTab("front");
                           setMobileMenuOpen(false);
@@ -1271,6 +1484,10 @@ export default function Home() {
                 <div className="flex items-center bg-amber-50 text-amber-800 rounded-lg px-2.5 py-1 text-[11px] border border-amber-200 font-bold font-mono">
                   <Star className="w-3 h-3 mr-1.5 fill-amber-400 text-amber-500" />
                   Daily Star Baseline
+                </div>
+                <div className="flex items-center bg-slate-100 rounded-lg px-2 py-1 text-[11px] border border-slate-200">
+                  <span className="font-bold text-slate-500 mr-1 uppercase font-mono">Date:</span>
+                  <span className="text-slate-700 font-medium">{deskDate || "All"}</span>
                 </div>
                 <div className="flex items-center bg-slate-100 rounded-lg px-2 py-1 text-[11px] border border-slate-200">
                   <span className="font-bold text-slate-500 mr-1 uppercase font-mono">Stories:</span>
@@ -1391,6 +1608,7 @@ export default function Home() {
                         { label: "All Stories", value: deskStories.length, icon: Newspaper },
                         { label: "Daily Star", value: dailyStarStoryCount, icon: Star },
                         { label: "Matched", value: totalMatches, icon: GitCompare },
+                        { label: "DS Gaps", value: coverageGapStories.length, icon: AlertTriangle },
                         { label: "Review", value: needsReviewCount, icon: AlertTriangle },
                       ].map((metric) => (
                         <div key={metric.label} className="rounded-2xl border border-white/10 bg-white/8 p-4 backdrop-blur">
@@ -1407,7 +1625,22 @@ export default function Home() {
               </section>
 
               <section className="rounded-3xl border border-slate-200 bg-white/90 p-3 shadow-sm backdrop-blur md:p-4">
-                <div className="grid gap-3 lg:grid-cols-[1.4fr_0.7fr_0.7fr_0.7fr]">
+                <div className="grid gap-3 lg:grid-cols-[0.7fr_1.35fr_0.75fr_0.7fr_0.7fr]">
+                  <label className="relative">
+                    <Calendar className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                    <select
+                      value={deskDate || ""}
+                      onChange={(event) => {
+                        setDeskDate(event.target.value || null);
+                        setDeskPublicationFilter("all");
+                      }}
+                      className="h-11 w-full rounded-2xl border border-slate-200 bg-slate-50 pl-10 pr-3 text-sm font-bold text-slate-700 outline-none focus:border-emerald-400 focus:bg-white"
+                    >
+                      {deskDateOptions.map((date) => (
+                        <option key={date} value={date}>{date}</option>
+                      ))}
+                    </select>
+                  </label>
                   <label className="relative">
                     <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
                     <input
@@ -1453,6 +1686,23 @@ export default function Home() {
                     ))}
                   </select>
                 </div>
+
+                {(isLoadingDeskEditions || deskLoadError || !hasDailyStarBaseline) && (
+                  <div className={cn(
+                    "mt-3 rounded-2xl border px-4 py-3 text-xs font-bold",
+                    isLoadingDeskEditions
+                      ? "border-blue-200 bg-blue-50 text-blue-700"
+                      : !hasDailyStarBaseline
+                        ? "border-amber-200 bg-amber-50 text-amber-800"
+                        : "border-rose-200 bg-rose-50 text-rose-700"
+                  )}>
+                    {isLoadingDeskEditions
+                      ? "Loading same-date OCR editions for comparison..."
+                      : !hasDailyStarBaseline
+                        ? "The Daily Star edition is not available for this date, so every important story is treated as a possible baseline gap."
+                        : deskLoadError}
+                  </div>
+                )}
 
                 <div className="mt-3 flex gap-2 overflow-x-auto pb-1">
                   {deskTabs.map((tab) => (
@@ -1589,6 +1839,74 @@ export default function Home() {
                       </div>
                     )}
                   </div>
+                </section>
+              )}
+
+              {deskTab === "gaps" && (
+                <section className="space-y-4">
+                  <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                    <div>
+                      <h2 className="text-xl font-black tracking-tight text-slate-950">Possible Daily Star Coverage Gaps</h2>
+                      <p className="text-sm text-slate-500">Important same-date stories that appear outside The Daily Star or have weak Daily Star similarity.</p>
+                    </div>
+                    <span className="w-fit rounded-full bg-rose-50 px-3 py-1 text-xs font-black uppercase tracking-widest text-rose-700">
+                      {coverageGapStories.length} gap{coverageGapStories.length === 1 ? "" : "s"}
+                    </span>
+                  </div>
+
+                  {coverageGapStories.length > 0 ? (
+                    <div className="space-y-4">
+                      {coverageGapStories.map((deskStory) => {
+                        const peerMatches = peerMatchesByStoryId.get(deskStory.id) || [];
+                        return (
+                          <div key={deskStory.id} className="grid gap-4 rounded-3xl border border-rose-200 bg-white p-5 shadow-sm xl:grid-cols-[1fr_360px]">
+                            <div>
+                              {renderDeskStoryCard(deskStory)}
+                            </div>
+                            <aside className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                              <div className="mb-3 flex items-center gap-2">
+                                <GitCompare className="h-4 w-4 text-rose-600" />
+                                <h3 className="text-sm font-black text-slate-950">Coverage Evidence</h3>
+                              </div>
+                              <div className="space-y-3">
+                                <div className="rounded-xl bg-white p-3">
+                                  <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Daily Star score</p>
+                                  <p className="mt-1 font-mono text-2xl font-black text-rose-700">{deskStory.comparisonScore}%</p>
+                                </div>
+                                {peerMatches.length > 0 ? peerMatches.slice(0, 4).map((match) => (
+                                  <button
+                                    key={match.story.id}
+                                    type="button"
+                                    onClick={() => setSelectedStory(match.story.story)}
+                                    className="w-full rounded-xl bg-white p-3 text-left transition hover:bg-emerald-50"
+                                  >
+                                    <p className="text-[10px] font-black uppercase tracking-widest text-emerald-700">
+                                      {match.score}% • {match.story.publicationName}
+                                    </p>
+                                    <p className="mt-1 line-clamp-2 text-xs font-black leading-snug text-slate-900">
+                                      {match.story.story.title}
+                                    </p>
+                                  </button>
+                                )) : (
+                                  <p className="rounded-xl bg-white p-3 text-xs font-semibold leading-relaxed text-slate-500">
+                                    No supporting publication match yet. This is still flagged because it is high priority or front-page news.
+                                  </p>
+                                )}
+                              </div>
+                            </aside>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    <div className="rounded-3xl border border-emerald-200 bg-emerald-50 p-8 text-center">
+                      <CheckCircle2 className="mx-auto mb-3 h-10 w-10 text-emerald-600" />
+                      <h3 className="font-black text-emerald-950">No obvious Daily Star gap for this filter</h3>
+                      <p className="mt-1 text-sm font-semibold text-emerald-700">
+                        Important same-date stories are either covered by Daily Star or not repeated strongly enough elsewhere.
+                      </p>
+                    </div>
+                  )}
                 </section>
               )}
 
