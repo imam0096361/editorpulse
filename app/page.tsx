@@ -612,10 +612,12 @@ export default function Home() {
     }))
   ), [uploadedPubs]);
 
-  const deskDateOptions = useMemo(() => Array.from(new Set([
-    ...uploadedEditionOptions.map((edition) => edition.date),
-    ...summaryPublications.map((publication) => publication.date),
-  ])).sort((a, b) => b.localeCompare(a)), [uploadedEditionOptions]);
+  const deskDateOptions = useMemo(() => {
+    const sourceDates = uploadedEditionOptions.length > 0
+      ? uploadedEditionOptions.map((edition) => edition.date)
+      : summaryPublications.map((publication) => publication.date);
+    return Array.from(new Set(sourceDates)).sort((a, b) => b.localeCompare(a));
+  }, [uploadedEditionOptions]);
 
   const deskDateOptionsKey = deskDateOptions.join("|");
 
@@ -839,7 +841,7 @@ export default function Home() {
 
   const deskPublications = deskEditionDetails.length > 0
     ? deskEditionDetails
-    : sameDateSummaryPublications.length >= 2
+    : deskDate
       ? sameDateSummaryPublications
       : dynamicSummaryPublication
         ? [
@@ -1018,16 +1020,28 @@ export default function Home() {
   const sidebarPubs: { id: string; name: string; hasPages: boolean; editions: EditionInfo[] }[] = [];
 
   for (const up of uploadedPubs) {
+    const editionsForActiveDate = deskDate
+      ? up.editions.filter((edition) => edition.date === deskDate)
+      : up.editions;
+
+    if (deskDate && editionsForActiveDate.length === 0) {
+      continue;
+    }
+
     allPubIds.add(up.id);
     sidebarPubs.push({
       id: up.id,
       name: up.name,
       hasPages: true,
-      editions: up.editions,
+      editions: editionsForActiveDate,
     });
   }
 
   for (const sp of summaryPublications) {
+    if (deskDate && sp.date !== deskDate) {
+      continue;
+    }
+
     if (!allPubIds.has(sp.id)) {
       allPubIds.add(sp.id);
       sidebarPubs.push({
@@ -1384,7 +1398,7 @@ export default function Home() {
                 <button
                   onClick={() => {
                     setSelectedPubId(pub.id);
-                    setSelectedDate(null);
+                    setSelectedDate(pub.editions[0]?.date || null);
                     if (pub.editions[0]?.date) setDeskDate(pub.editions[0].date);
                     setMobileMenuOpen(false);
                     setViewMode("summary");
