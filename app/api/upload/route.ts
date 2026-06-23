@@ -58,6 +58,31 @@ async function pageSourceToBase64(pageSource: string): Promise<{ base64: string;
   return fileToBase64(path.join(process.cwd(), "public", pageSource));
 }
 
+function getPublicationOutputLanguage(pubId: string, publicationName: string) {
+  const normalizedPubId = pubId.toLowerCase();
+  const normalizedName = publicationName.toLowerCase();
+
+  if (normalizedPubId === "daily-star" || normalizedName.includes("daily star")) {
+    return "English";
+  }
+
+  return "Bangla";
+}
+
+function getLanguageLockInstruction(outputLanguage: string) {
+  if (outputLanguage === "English") {
+    return `LANGUAGE LOCK:
+- Output every reader-facing field in natural newsroom English only: title, subheadline, byline, author, category, summary, and jumpDetails.
+- Do not translate Daily Star stories into Bangla.
+- Keep names, quoted terms, institutions, and numbers faithful to the printed article.`;
+  }
+
+  return `LANGUAGE LOCK:
+- Output every reader-facing field in natural Bangla script only: title, subheadline, byline, author, category, summary, and jumpDetails.
+- Do not write summaries in English and do not use romanized Bangla.
+- Keep names, quoted terms, institutions, and numbers faithful to the printed article.`;
+}
+
 export function parseOcrPages(input: string, totalPages: number): number[] {
   const pages = new Set<number>();
   const parts = input.split(",").map(p => p.trim().toLowerCase());
@@ -127,9 +152,14 @@ async function mergeStoryJump(
 
   console.log(`[Jump Resolution] Resolving jump for story "${story.title}" to Page ${jumpPageNumber}`);
   const { base64, mimeType } = await pageSourceToBase64(pageSources[jumpIndex] || savedPages[jumpIndex]);
+  const outputLanguage = getPublicationOutputLanguage(pubId, publicationName);
+  const languageLockInstruction = getLanguageLockInstruction(outputLanguage);
   
   const jumpPrompt = `You are a meticulous newspaper continuation editor. Accuracy is more important than completeness.
 We are analyzing a newspaper edition for "${publicationName}" on "${date}".
+The required output language is: ${outputLanguage}.
+${languageLockInstruction}
+
 Here is the beginning of a news story from Page ${story.originPage}:
 Title: "${story.title}"
 Subheadline: "${story.subheadline || ''}"
@@ -142,8 +172,10 @@ Please:
 2. Confirm the match using headline words, names, places, topic, continuation marker, column context, or repeated lead facts.
 3. If the page does not clearly contain this story's continuation, set "matched" to false and do not invent or merge unrelated material.
 4. If matched, read the continuation text and extract all detailed facts, statistics, statements, and conclusions.
-5. Seamlessly merge the continuation content with the "Initial Summary" into a single, cohesive, highly detailed, editorial-grade narrative summary (at least 5 to 7 sentences, 150-250 words) that reads naturally and completely.
-6. Output your response as a JSON object matching this schema:
+5. Seamlessly merge the continuation content with the "Initial Summary" into a single, cohesive, highly detailed, editorial-grade narrative summary (at least 5 to 7 sentences, 150-250 words) that reads naturally and completely in ${outputLanguage}.
+6. The merged summary must carry the full story's main theme, key actors, causes, chronology, numbers/statistics, official responses, consequences, and conclusion. Do not merely append the continuation text; rewrite it as one complete newsroom digest.
+7. Keep "summary" and "jumpDetails" in ${outputLanguage}. For Bangla output, use Bangla script only.
+8. Output your response as a JSON object matching this schema:
 {
   "matched": true,
   "confidence": 0.95,
@@ -213,6 +245,8 @@ export async function runGeminiOCR(
   const isProthomAlo = pubId === "prothom-alo" || publicationName.toLowerCase().includes("prothom") || publicationName.includes("প্রথম আলো");
   const isDailyStar = pubId === "daily-star" || publicationName.toLowerCase().includes("daily star");
   const isSamakal = pubId === "samakal" || publicationName.toLowerCase().includes("samakal") || publicationName.includes("সমকাল");
+  const outputLanguage = getPublicationOutputLanguage(pubId, publicationName);
+  const languageLockInstruction = getLanguageLockInstruction(outputLanguage);
 
   const ocrIndices = parseOcrPages(ocrPagesInput, savedPages.length);
   if (ocrIndices.length === 0) {
@@ -236,17 +270,19 @@ export async function runGeminiOCR(
 
   const prompt = `You are a prestigious Chief Newspaper Editor and lead curator. Your task is to analyze these ${ocrIndices.length} uploaded newspaper page images, identify their news stories, and compile them into extremely high-fidelity, deep, and cohesive articles.
 Your publication is: "${publicationName}". Date is: "${date}".
+The required output language is: ${outputLanguage}.
+${languageLockInstruction}
 
 We want to focus on extracting the main news stories starting on specific pages:
 - Target news source pages: ${ocrPagesInput} (mapped to pages: ${pageNumbers.join(", ")}).
 
 For each news story on the targeted pages, please extract and synthesize:
-- title: A powerful, high-impact main headline (in the language of the newspaper - e.g. Bengali for Prothom Alo or Samakal, English for Daily Star).
-- subheadline: A beautifully descriptive secondary summary tagline context line.
-- byline: Reporting location/desk (e.g. "DHAKA", "Sports Desk", "Staff Reporter").
-- author: The dedicated writer/reporter's name (if none is explicitly listed, write "Reporter").
-- category: e.g. Lead News, Metropolitan, National Policy, Sports, Arts & Culture.
-- summary: A highly detailed, editorial-grade narrative summary (at least 3 to 5 substantial sentences, 100-150 words) structured as a complete news capsule. Do NOT write brief, generic, or truncated summaries. You must fully explain the context, key individuals, numbers/statistics, and events.
+- title: A powerful, high-impact main headline in ${outputLanguage}.
+- subheadline: A beautifully descriptive secondary summary tagline context line in ${outputLanguage}.
+- byline: Reporting location/desk in ${outputLanguage} (e.g. "DHAKA", "Sports Desk", "Staff Reporter" for English; "ঢাকা", "ক্রীড়া প্রতিবেদক", "নিজস্ব প্রতিবেদক" for Bangla).
+- author: The dedicated writer/reporter's name if explicitly listed; otherwise use the natural ${outputLanguage} equivalent of "Reporter".
+- category: A concise newsroom category in ${outputLanguage}.
+- summary: A highly detailed, editorial-grade narrative summary in ${outputLanguage} (at least 3 to 5 substantial sentences, 100-150 words) structured as a complete news capsule. Do NOT write brief, generic, or truncated summaries. You must fully explain the story's main theme, context, key individuals, organizations, numbers/statistics, chronology, official responses, consequences, and conclusion.
 - originPage: The source page of the lead story (e.g. "P.01", "P.02", "P.16").
 - hasJump: Set to true only if the story text clearly contains a continuation marker or page jump instruction (e.g., "৪-এর পাতায় দেখুন", "বাকি অংশ পৃষ্ঠা ৪", "Continued on Page 4"). Do not infer a jump only because an article feels incomplete.
 - jumpPageNumber: The target page number where the story continues (1-based integer, e.g. 4. If hasJump is false, write null or omit).
@@ -256,6 +292,8 @@ Jump/continuation accuracy rules:
 - Never merge a continuation unless the later page clearly matches the same story by headline/topic/names/places/lead facts.
 - Keep unrelated stories separate even if they share a broad topic.
 - If the target page number is unclear, set hasJump to false rather than guessing.
+- When a continuation is found, the final merged story must remain in ${outputLanguage} and must read like one complete article digest, not a short preview.
+- The summary must preserve the full news theme and all important continuation facts so an editor can understand the whole story without opening the page.
 
 Please categorize the final extracted stories as follows:
 ${categorizationInstructions}

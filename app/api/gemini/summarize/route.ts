@@ -22,6 +22,30 @@ function getGeminiClient() {
   return aiClient;
 }
 
+function getPublicationOutputLanguage(publicationName: string) {
+  const normalizedName = publicationName.toLowerCase();
+
+  if (normalizedName.includes("daily star")) {
+    return "English";
+  }
+
+  return "Bangla";
+}
+
+function getLanguageLockInstruction(outputLanguage: string) {
+  if (outputLanguage === "English") {
+    return `LANGUAGE LOCK:
+- Output every reader-facing field in natural newsroom English only: title, subheadline, byline, author, category, summary, and jumpDetails.
+- Do not translate Daily Star stories into Bangla.
+- Keep names, quoted terms, institutions, and numbers faithful to the printed article.`;
+  }
+
+  return `LANGUAGE LOCK:
+- Output every reader-facing field in natural Bangla script only: title, subheadline, byline, author, category, summary, and jumpDetails.
+- Do not write summaries in English and do not use romanized Bangla.
+- Keep names, quoted terms, institutions, and numbers faithful to the printed article.`;
+}
+
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
@@ -37,6 +61,8 @@ export async function POST(req: NextRequest) {
       imageMimeType,
       imageFiles // Optional array of base64 files
     } = body;
+    const outputLanguage = getPublicationOutputLanguage(publicationName || "");
+    const languageLockInstruction = getLanguageLockInstruction(outputLanguage);
 
     // Check key availability first for transparent user reporting
     if (!process.env.GEMINI_API_KEY) {
@@ -159,17 +185,19 @@ By integrating the secondary physical fitness ledgers and therapist feedback, ou
       });
       prompt = `You are a prestigious Chief Newspaper Editor and lead curator. Your task is to analyze these ${imageFiles.length} uploaded newspaper page images (or PDF pages), identify its news stories, and compile them into extremely high-fidelity, deep, and cohesive articles.
 Your publication is: "${publicationName || "Draft Scan"}". Date is: "${date || "Today"}".
+The required output language is: ${outputLanguage}.
+${languageLockInstruction}
 
 For each news story across these newspaper pages, please extract and synthesize:
-- title: A powerful, high-impact main headline.
-- subheadline: A beautifully descriptive secondary summary tagline context line.
-- byline: Reporting location/desk (e.g. "DHAKA", "Sports Desk", "Staff Reporter").
-- author: The dedicated writer/reporter's name (if none is explicitly listed, write "Reporter").
-- category: e.g. Lead, Metropolitan, National Policy, Sports, Arts & Culture.
-- summary: A highly detailed, editorial-grade narrative summary (at least 3 to 5 substantial sentences, 100-150 words) structured as a complete news capsule. Do NOT write brief, generic, or truncated summaries. You must fully explain the entire context, key individuals or organizations involved, statistical numbers, crucial event occurrences, official response, and underlying causes. If a story has pointers or links indicating a jump/continuation on another page (or if the story's continuation is present on another of the uploaded pages), you MUST automatically fuse, align, and consolidate those continuation segments cleanly into this single summary so that the story is fully resolved.
+- title: A powerful, high-impact main headline in ${outputLanguage}.
+- subheadline: A beautifully descriptive secondary summary tagline context line in ${outputLanguage}.
+- byline: Reporting location/desk in ${outputLanguage}.
+- author: The dedicated writer/reporter's name if explicitly listed; otherwise use the natural ${outputLanguage} equivalent of "Reporter".
+- category: A concise newsroom category in ${outputLanguage}.
+- summary: A highly detailed, editorial-grade narrative summary in ${outputLanguage} (at least 3 to 5 substantial sentences, 100-150 words) structured as a complete news capsule. Do NOT write brief, generic, or truncated summaries. You must fully explain the entire context, key individuals or organizations involved, statistical numbers, crucial event occurrences, official response, underlying causes, consequences, and conclusion. If a story has pointers or links indicating a jump/continuation on another page (or if the story's continuation is present on another of the uploaded pages), you MUST automatically fuse, align, and consolidate those continuation segments cleanly into this single summary so that the story is fully resolved.
 - originPage: The source page of the lead story (e.g. "P.01", "P.03", "P.16" depending on which page holds the main story start).
 - jumpMerged: If you bridged or merged information for this story from another page, specify the page number (e.g., "P.04" or "P.12").
-- jumpDetails: If bridged or merged, provide an explanation trace explaining exactly which details were unified from the jump page.
+- jumpDetails: If bridged or merged, provide an explanation trace in ${outputLanguage} explaining exactly which details were unified from the jump page.
 
 Please categorize the final extracted stories into frontPage (stories from Page 1), pageThree (local/metro stories from Page 3), and backPage (sports, culture, or final page stories) as cleanly and logically as possible, so they map perfectly into our 3-column newspaper dashboard layout. Ensure the resulting summaries act as an authoritative and complete digest allowing any reader to fully understand the entire issue without requiring external context.`;
     } else if (imageFileBase64 && imageMimeType) {
@@ -182,14 +210,16 @@ Please categorize the final extracted stories into frontPage (stories from Page 
       });
       prompt = `You are a prestigious Chief Newspaper Editor and lead curator. Your task is to analyze this uploaded newspaper page image, identify its news stories, and compile them into extremely high-fidelity, deep, and cohesive articles.
 Your publication is: "${publicationName || "Draft Scan"}". Date is: "${date || "Today"}".
+The required output language is: ${outputLanguage}.
+${languageLockInstruction}
 
 For each news story on this page, please extract and synthesize:
-- title: A powerful, high-impact main headline.
-- subheadline: A beautifully descriptive secondary summary tagline context line.
-- byline: Reporting location/desk (e.g. "DHAKA", "Sports Desk", "Staff Reporter").
-- author: The dedicated writer/reporter's name (if none is explicitly listed, write "Reporter").
-- category: e.g. Lead, Metropolitan, National Policy, Sports, Arts & Culture.
-- summary: A highly detailed, editorial-grade narrative summary (at least 3 to 5 substantial sentences, 100-150 words) structured as a complete news capsule. Do NOT write brief, generic, or truncated summaries. You must fully explain the entire context, key individuals or organizations involved, statistical numbers, crucial event occurrences, official responses, and underlying causes. If the story has pointers or links indicating a jump/continuation on another page, outline that connection and describe how the narrative would develop.
+- title: A powerful, high-impact main headline in ${outputLanguage}.
+- subheadline: A beautifully descriptive secondary summary tagline context line in ${outputLanguage}.
+- byline: Reporting location/desk in ${outputLanguage}.
+- author: The dedicated writer/reporter's name if explicitly listed; otherwise use the natural ${outputLanguage} equivalent of "Reporter".
+- category: A concise newsroom category in ${outputLanguage}.
+- summary: A highly detailed, editorial-grade narrative summary in ${outputLanguage} (at least 3 to 5 substantial sentences, 100-150 words) structured as a complete news capsule. Do NOT write brief, generic, or truncated summaries. You must fully explain the entire context, key individuals or organizations involved, statistical numbers, crucial event occurrences, official responses, underlying causes, consequences, and conclusion. If the story has pointers or links indicating a jump/continuation on another page, outline that connection and describe how the narrative would develop.
 - originPage: The source page being scanned (e.g. "P.01", "P.03", "P.12").
 
 Ensure the resulting summaries act as an authoritative and complete digest allowing any reader to fully understand the entire issue without requiring external context.`;
@@ -201,6 +231,8 @@ Your goal is to ensure the reader receives an exceptionally comprehensive, conte
 
 Publication: ${publicationName || "E-Paper"}
 Date: ${date || "Current"}
+The required output language is: ${outputLanguage}.
+${languageLockInstruction}
 
 --- FRONT PAGE RAW TEXT ---
 ${frontPageRawText || "No raw text provided"}
@@ -216,13 +248,13 @@ ${jumpPageRawText || "No raw text provided"}
 
 INSTRUCTIONS:
 1. FRONT PAGE STORIES (Identify 2-3 prominent news stories from the FRONT PAGE):
-   - title: high-impact main headline
-   - subheadline: descriptive secondary summary tagline context line
-   - byline: reporting location/desk (e.g., 'DHAKA', 'NEW YORK')
+   - title: high-impact main headline in ${outputLanguage}
+   - subheadline: descriptive secondary summary tagline context line in ${outputLanguage}
+   - byline: reporting location/desk in ${outputLanguage}
    - author: the writer/reporter's name
-   - category: e.g. Lead, Policy, Economy
+   - category: concise newsroom category in ${outputLanguage}
    - originPage: 'P.01'
-   - summary: Compile each story into a deep, editorial-grade narrative news digest (at least 3 to 5 substantial sentences, 100-150 words) that details the core issue, key statistical metrics, quotes, names of organizations/officials, responses, and future outlook. Cover the 'Who, What, Where, When, and Why' thoroughly so the reader fully understands the entire news story.
+   - summary: Compile each story in ${outputLanguage} into a deep, editorial-grade narrative news digest (at least 3 to 5 substantial sentences, 100-150 words) that details the core issue, key statistical metrics, quotes, names of organizations/officials, responses, consequences, conclusion, and future outlook. Cover the 'Who, What, Where, When, and Why' thoroughly so the reader fully understands the entire news story.
 
 2. PAGE 3 (METROPOLITAN/LOCAL) STORIES (Identify 1-2 stories from PAGE 3):
    - summary: Provide a complete metropolitan narrative (at least 3 to 5 sentences) explaining the local dynamics, administrative interventions, resident impact, and civic solutions.
@@ -233,8 +265,8 @@ INSTRUCTIONS:
 4. CRITICAL JUMP SEAMLESS FUSION LOGIC (FOR FRONT PAGE AND PAGE 3):
    - Carefully read and analyze the JUMP/CONTINUATION page text. 
    - Identify which blocks of text continue stories from either the FRONT PAGE or PAGE 3.
-   - You MUST cleanly fuse and synthesize the continuation details directly into the parent story's 'summary' field. Form a single, perfectly unified, continuous, and satisfying journalistic review.
-   - Set "jumpMerged" to "P.0${jumpPageNumber || 4}" and put a nice log trace in "jumpDetails" explaining exactly which continuation details, numbers, or statements were unified from the jump page to build the complete story.
+   - You MUST cleanly fuse and synthesize the continuation details directly into the parent story's 'summary' field in ${outputLanguage}. Form a single, perfectly unified, continuous, and satisfying journalistic review that preserves the full main theme.
+   - Set "jumpMerged" to "P.0${jumpPageNumber || 4}" and put a precise ${outputLanguage} log trace in "jumpDetails" explaining exactly which continuation details, numbers, or statements were unified from the jump page to build the complete story.
    - Incorporate the jump details directly into that story's "summary"!
 
 5. Return a clean, well-synthesized response conforming strictly to the structured JSON schema. Ensure absolutely that NO summaries are left as a brief 1-2 sentence preview or left with unresolved loose ends. The summary should be so thorough that reading it tells the entire news story. Do not output anything other than JSON.`;
