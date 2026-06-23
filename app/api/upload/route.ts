@@ -63,19 +63,45 @@ export function parseOcrPages(input: string, totalPages: number): number[] {
   const parts = input.split(",").map(p => p.trim().toLowerCase());
   
   parts.forEach(part => {
+    if (!part) {
+      return;
+    }
+
+    if (part === "all") {
+      for (let index = 0; index < totalPages; index++) {
+        pages.add(index);
+      }
+      return;
+    }
+
     if (part === "last") {
       if (totalPages > 0) pages.add(totalPages - 1);
-    } else {
-      const num = parseInt(part);
-      if (!isNaN(num)) {
-        if (num >= 1) {
-          const index = num - 1;
-          if (index < totalPages) {
-            pages.add(index);
-          } else {
-            // Clamp to last page if page number exceeds total page count
-            pages.add(totalPages - 1);
-          }
+      return;
+    }
+
+    const rangeMatch = part.match(/^(\d+)\s*-\s*(\d+)$/);
+    if (rangeMatch) {
+      const start = parseInt(rangeMatch[1], 10);
+      const end = parseInt(rangeMatch[2], 10);
+      const min = Math.min(start, end);
+      const max = Math.max(start, end);
+      for (let pageNumber = min; pageNumber <= max; pageNumber++) {
+        if (pageNumber >= 1 && totalPages > 0) {
+          pages.add(Math.min(pageNumber - 1, totalPages - 1));
+        }
+      }
+      return;
+    }
+
+    const num = parseInt(part);
+    if (!isNaN(num)) {
+      if (num >= 1) {
+        const index = num - 1;
+        if (index < totalPages) {
+          pages.add(index);
+        } else if (totalPages > 0) {
+          // Clamp to last page if page number exceeds total page count.
+          pages.add(totalPages - 1);
         }
       }
     }
@@ -189,6 +215,10 @@ export async function runGeminiOCR(
   const isSamakal = pubId === "samakal" || publicationName.toLowerCase().includes("samakal") || publicationName.includes("সমকাল");
 
   const ocrIndices = parseOcrPages(ocrPagesInput, savedPages.length);
+  if (ocrIndices.length === 0) {
+    throw new Error("No valid OCR pages were selected. Use page numbers like 1, 2, 3, last.");
+  }
+
   const pageNumbers = ocrIndices.map(idx => idx + 1);
   const firstPage = pageNumbers[0] || 1;
   const lastPage = pageNumbers[pageNumbers.length - 1] || savedPages.length;

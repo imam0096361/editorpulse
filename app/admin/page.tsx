@@ -47,6 +47,12 @@ const PUBLICATION_PRESETS = [
   { id: "custom", name: "— Custom Publication —" },
 ];
 
+function getLocalDateInputValue() {
+  const now = new Date();
+  const timezoneOffsetMs = now.getTimezoneOffset() * 60 * 1000;
+  return new Date(now.getTime() - timezoneOffsetMs).toISOString().split("T")[0];
+}
+
 async function readJsonResponse(res: Response) {
   const text = await res.text();
   try {
@@ -100,7 +106,7 @@ export default function AdminPage() {
   // Upload form state
   const [selectedPreset, setSelectedPreset] = useState(PUBLICATION_PRESETS[0].id);
   const [customName, setCustomName] = useState("");
-  const [pubDate, setPubDate] = useState(() => new Date().toISOString().split("T")[0]);
+  const [pubDate, setPubDate] = useState(getLocalDateInputValue);
   const [editionLabel, setEditionLabel] = useState("Standard Edition");
   const [attachedFiles, setAttachedFiles] = useState<File[]>([]);
   const [isDragging, setIsDragging] = useState(false);
@@ -127,7 +133,7 @@ export default function AdminPage() {
     } else if (selectedPreset === "daily-star") {
       setOcrPagesInput("1, 3, 12");
     } else if (selectedPreset === "samakal") {
-      setOcrPagesInput("1, 16");
+      setOcrPagesInput("1, 2, 3, last");
     } else {
       setOcrPagesInput("1, 3, last");
     }
@@ -375,7 +381,7 @@ export default function AdminPage() {
       const res = await fetch("/api/seed", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ pubId: "samakal", ocrPages: "1, 16" })
+        body: JSON.stringify({ pubId: "samakal", ocrPages: "1, 2, 3, last" })
       });
       const data = await readJsonResponse(res);
       if (res.ok && data.success) {
@@ -625,8 +631,25 @@ export default function AdminPage() {
                   className="w-full bg-slate-800/60 border border-slate-700/60 rounded-lg px-3.5 py-2.5 text-sm text-slate-200 placeholder:text-slate-600 focus:outline-none focus:border-blue-500"
                 />
                 <p className="text-[10px] text-slate-500 mt-1">
-                  Comma-separated list of pages to extract news from. Use &quot;last&quot; for the last page. Jumps are automatically resolved.
+                  Comma-separated pages to extract. Supports &quot;last&quot;, &quot;all&quot;, and ranges like &quot;1-7&quot;.
                 </p>
+                <div className="mt-2 flex flex-wrap gap-2">
+                  {[
+                    { label: "Front + 2 + 3 + Last", value: "1, 2, 3, last" },
+                    { label: "Front + 3 + Last", value: "1, 3, last" },
+                    { label: "First 7", value: "1-7" },
+                    { label: "All Uploaded", value: "all" },
+                  ].map((preset) => (
+                    <button
+                      key={preset.value}
+                      type="button"
+                      onClick={() => setOcrPagesInput(preset.value)}
+                      className="rounded-md border border-slate-700/70 bg-slate-800/50 px-2.5 py-1 text-[10px] font-bold text-slate-400 transition-colors hover:border-blue-500/50 hover:text-blue-300"
+                    >
+                      {preset.label}
+                    </button>
+                  ))}
+                </div>
               </div>
 
               {/* File Drop Zone */}
@@ -792,7 +815,7 @@ export default function AdminPage() {
                     ) : (
                       <FolderOpen className="w-3.5 h-3.5" />
                     )}
-                    {isSeedingSamakal ? "Seeding Samakal..." : "Seed Samakal (16 Pages)"}
+                    {isSeedingSamakal ? "Seeding Samakal..." : "Seed Samakal (1,2,3,last)"}
                   </button>
                 </div>
               </div>

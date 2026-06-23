@@ -61,6 +61,9 @@ export async function POST(req: NextRequest) {
     }
 
     const isSamakal = pubId === "samakal";
+    if (isSamakal && ocrPagesInput === "1, 2, 17") {
+      ocrPagesInput = "1, 2, 3, last";
+    }
     const publicationName = isSamakal ? "সমকাল (Samakal)" : "প্রথম আলো (Prothom Alo)";
     const sampleDir = isSamakal ? SAMAKAL_SAMPLES : PROTHOM_ALO_SAMPLES;
     const today = new Date().toISOString().split("T")[0]; // YYYY-MM-DD

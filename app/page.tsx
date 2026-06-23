@@ -676,12 +676,7 @@ export default function Home() {
         if (isCancelled) return;
         const loadedPublications = results
           .filter((result): result is PromiseFulfilledResult<Publication> => result.status === "fulfilled")
-          .map((result) => result.value)
-          .filter((publication) => (
-            publication.frontPage.length > 0 ||
-            publication.pageThree.length > 0 ||
-            publication.backPage.length > 0
-          ));
+          .map((result) => result.value);
 
         setDeskEditionDetails(loadedPublications);
         const failedCount = results.filter((result) => result.status === "rejected").length;
@@ -950,11 +945,11 @@ export default function Home() {
   const groupedPublicationSections = deskPublications
     .slice()
     .sort((a, b) => Number(isDailyStarPublication(b.id, b.name)) - Number(isDailyStarPublication(a.id, a.name)))
+    .filter((publication) => deskPublicationFilter === "all" || publication.id === deskPublicationFilter)
     .map((publication) => ({
       publication,
       stories: filteredDeskStories.filter((deskStory) => deskStory.publicationId === publication.id),
-    }))
-    .filter((section) => section.stories.length > 0);
+    }));
 
   const storyClusters: StoryCluster[] = baselineStories.map((anchor) => ({
     anchor,
@@ -1796,9 +1791,15 @@ export default function Home() {
                                   {section.stories.length} news
                                 </span>
                               </div>
-                              <div className="space-y-3">
-                                {section.stories.map((deskStory) => renderDeskStoryCard(deskStory))}
-                              </div>
+                              {section.stories.length > 0 ? (
+                                <div className="space-y-3">
+                                  {section.stories.map((deskStory) => renderDeskStoryCard(deskStory))}
+                                </div>
+                              ) : (
+                                <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-5 text-sm font-semibold text-slate-500">
+                                  No summary news extracted for this publication on {section.publication.date}. Re-run OCR with the needed pages selected.
+                                </div>
+                              )}
                             </div>
                           );
                         })}
