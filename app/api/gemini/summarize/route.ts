@@ -1,6 +1,8 @@
 import { GoogleGenAI, Type } from "@google/genai";
 import { NextRequest, NextResponse } from "next/server";
 
+const DEFAULT_GEMINI_OCR_MODEL = "gemini-2.5-flash";
+
 // Lazy-loaded Gemini client to prevent startup failure when key is unset
 let aiClient: GoogleGenAI | null = null;
 
@@ -20,6 +22,10 @@ function getGeminiClient() {
     });
   }
   return aiClient;
+}
+
+function getGeminiOcrModel() {
+  return process.env.GEMINI_OCR_MODEL?.trim() || DEFAULT_GEMINI_OCR_MODEL;
 }
 
 function getPublicationOutputLanguage(publicationName: string) {
@@ -275,7 +281,7 @@ INSTRUCTIONS:
     parts.push({ text: prompt });
 
     const response = await ai.models.generateContent({
-      model: "gemini-3.5-flash",
+      model: getGeminiOcrModel(),
       contents: parts,
       config: {
         responseMimeType: "application/json",

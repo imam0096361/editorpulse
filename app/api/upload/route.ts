@@ -7,6 +7,8 @@ import { isAdminRequestAuthorized } from "@/lib/admin-auth";
 import { syncLocalEditionToSupabase, uploadPageToSupabaseStorage } from "@/lib/editorpulse-backend";
 
 const UPLOADS_DIR = path.join(process.cwd(), "public", "uploads");
+const DEFAULT_GEMINI_OCR_MODEL = "gemini-2.5-flash";
+const DEFAULT_GEMINI_JUMP_MODEL = "gemini-2.5-pro";
 
 // Lazy-loaded Gemini client
 let aiClient: GoogleGenAI | null = null;
@@ -27,6 +29,15 @@ function getGeminiClient() {
     });
   }
   return aiClient;
+}
+
+function getGeminiModel(task: "ocr" | "jump") {
+  const configuredModel =
+    task === "jump" ? process.env.GEMINI_JUMP_MODEL : process.env.GEMINI_OCR_MODEL;
+
+  return configuredModel?.trim() || (
+    task === "jump" ? DEFAULT_GEMINI_JUMP_MODEL : DEFAULT_GEMINI_OCR_MODEL
+  );
 }
 
 function fileToBase64(filePath: string): { base64: string; mimeType: string } {
@@ -187,7 +198,7 @@ Do not include markdown formatting or backticks outside of the JSON block itself
   try {
     const ai = getGeminiClient();
     const response = await ai.models.generateContent({
-      model: "gemini-3.5-flash",
+      model: getGeminiModel("jump"),
       contents: [
         {
           inlineData: {
@@ -412,7 +423,7 @@ Ensure the resulting summaries act as an authoritative and complete digest allow
     resolvedParts.push({ text: prompt });
 
     const response = await ai.models.generateContent({
-      model: "gemini-3.5-flash",
+      model: getGeminiModel("ocr"),
       contents: resolvedParts,
       config: {
         responseMimeType: "application/json",
