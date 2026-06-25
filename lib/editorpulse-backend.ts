@@ -1,5 +1,6 @@
 import fs from "fs";
 import path from "path";
+import { getUploadsDir, localUploadUrl } from "@/lib/local-uploads";
 
 type EditionStory = {
   title: string;
@@ -36,7 +37,6 @@ export type EditionListRecord = Pick<
   "publication_id" | "publication_name" | "date" | "edition" | "page_count"
 >;
 
-const localUploadsDir = path.join(process.cwd(), "public", "uploads");
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || "";
 const supabaseKey =
   process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
@@ -111,10 +111,10 @@ export function savePageToLocalUploads(options: {
   objectPath: string;
   buffer: Buffer;
 }) {
-  const destinationPath = path.join(localUploadsDir, options.objectPath);
+  const destinationPath = path.join(getUploadsDir(), options.objectPath);
   fs.mkdirSync(path.dirname(destinationPath), { recursive: true });
   fs.writeFileSync(destinationPath, options.buffer);
-  return `/uploads/${options.objectPath.replace(/\\/g, "/")}`;
+  return localUploadUrl(options.objectPath);
 }
 
 export async function uploadPageToSupabaseStorage(options: {

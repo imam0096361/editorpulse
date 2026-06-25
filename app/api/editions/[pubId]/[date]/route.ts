@@ -9,8 +9,9 @@ import {
   getEditionFromSupabase,
   listEditionDatesForPublication,
 } from "@/lib/editorpulse-backend";
+import { getUploadsDir, localUploadUrl } from "@/lib/local-uploads";
 
-const UPLOADS_DIR = path.join(process.cwd(), "public", "uploads");
+const UPLOADS_DIR = getUploadsDir();
 
 function isSafePathSegment(value: string) {
   return value.length > 0 && !value.includes("/") && !value.includes("\\") && value !== "." && value !== "..";
@@ -44,7 +45,7 @@ function getLocalEdition(pubId: string, date: string) {
     : [];
 
   const pages = imageFiles.length > 0
-    ? imageFiles.map((f) => `/uploads/${pubId}/${date}/${f}`)
+    ? imageFiles.map((f) => localUploadUrl(`${pubId}/${date}/${f}`))
     : Array.isArray(editionMeta?.pages)
       ? editionMeta.pages
       : [];

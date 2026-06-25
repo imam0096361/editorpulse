@@ -39,12 +39,24 @@ Use these settings in Dokploy:
 Required environment variables for production:
 
 - `GEMINI_API_KEY`
-- `GEMINI_OCR_MODEL`
-- `GEMINI_JUMP_MODEL`
 - `ADMIN_USERNAME`
 - `ADMIN_PASSWORD`
 - `ADMIN_SESSION_SECRET`
+
+Optional environment variables:
+
+- `GEMINI_OCR_MODEL`
+- `GEMINI_JUMP_MODEL`
 - `APP_URL`
+- `EDITORPULSE_UPLOADS_DIR`
+
+If Supabase is not configured, the Docker image stores uploads and OCR summaries under:
+
+- `/data/editorpulse/uploads`
+
+In Dokploy, add persistent storage for that path so uploaded editions survive restarts and redeploys:
+
+- Mount path: `/data/editorpulse/uploads`
 
 Optional but recommended for production persistence and cross-instance sync:
 
@@ -62,5 +74,6 @@ Recommended production values:
 
 Notes:
 
-- Uploads and OCR results should persist through Supabase in production.
+- Without Supabase, uploads and OCR results persist through the Dokploy volume above.
+- With Supabase env vars present, the app keeps syncing publications, editions, and page files to Supabase.
 - `APP_URL` should be your Dokploy domain, for example `https://editorpulse.yourdomain.com`.

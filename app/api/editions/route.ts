@@ -2,8 +2,9 @@ import { NextResponse } from "next/server";
 import fs from "fs";
 import path from "path";
 import { listPublicationsFromSupabase } from "@/lib/editorpulse-backend";
+import { getUploadsDir, localUploadUrl } from "@/lib/local-uploads";
 
-const UPLOADS_DIR = path.join(process.cwd(), "public", "uploads");
+const UPLOADS_DIR = getUploadsDir();
 export const dynamic = "force-dynamic";
 
 export interface EditionInfo {
@@ -84,7 +85,7 @@ function listLocalPublications(): PublicationInfo[] {
           date: dateDir.name,
           edition: "Standard Edition",
           pageCount: imageFiles.length,
-          pages: imageFiles.map((f) => `/uploads/${pubDir.name}/${dateDir.name}/${f}`),
+          pages: imageFiles.map((f) => localUploadUrl(`${pubDir.name}/${dateDir.name}/${f}`)),
         });
       }
     }

@@ -9,8 +9,9 @@ import {
   syncLocalEditionToSupabase,
   uploadPageToSupabaseStorage,
 } from "@/lib/editorpulse-backend";
+import { getUploadsDir, pathFromLocalUploadUrl } from "@/lib/local-uploads";
 
-const UPLOADS_DIR = path.join(process.cwd(), "public", "uploads");
+const UPLOADS_DIR = getUploadsDir();
 const DEFAULT_GEMINI_OCR_MODEL = "gemini-2.5-flash";
 const DEFAULT_GEMINI_JUMP_MODEL = "gemini-2.5-pro";
 
@@ -70,7 +71,12 @@ async function pageSourceToBase64(pageSource: string): Promise<{ base64: string;
     };
   }
 
-  return fileToBase64(path.join(process.cwd(), "public", pageSource));
+  const localFilePath = pathFromLocalUploadUrl(pageSource);
+  if (!localFilePath) {
+    throw new Error(`Unsupported uploaded page source: ${pageSource}`);
+  }
+
+  return fileToBase64(localFilePath);
 }
 
 function getPublicationOutputLanguage(pubId: string, publicationName: string) {
