@@ -36,6 +36,7 @@ export type EditionListRecord = Pick<
   "publication_id" | "publication_name" | "date" | "edition" | "page_count"
 >;
 
+const localUploadsDir = path.join(process.cwd(), "public", "uploads");
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || "";
 const supabaseKey =
   process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
@@ -44,8 +45,12 @@ const supabaseKey =
 const editorpulseApiKey = process.env.EDITORPULSE_API_KEY || "";
 const storageBucket = process.env.SUPABASE_STORAGE_BUCKET || "editorpulse-pages";
 
+export function hasSupabaseBackendConfig() {
+  return Boolean(supabaseUrl && supabaseKey && editorpulseApiKey);
+}
+
 function ensureConfig() {
-  if (!supabaseUrl || !supabaseKey || !editorpulseApiKey) {
+  if (!hasSupabaseBackendConfig()) {
     throw new Error("Supabase backend env vars are missing");
   }
 }
@@ -102,6 +107,16 @@ export function getSupabaseStoragePublicUrl(objectPath: string) {
   return `${supabaseUrl}/storage/v1/object/public/${storageBucket}/${encodeObjectPath(objectPath)}`;
 }
 
+export function savePageToLocalUploads(options: {
+  objectPath: string;
+  buffer: Buffer;
+}) {
+  const destinationPath = path.join(localUploadsDir, options.objectPath);
+  fs.mkdirSync(path.dirname(destinationPath), { recursive: true });
+  fs.writeFileSync(destinationPath, options.buffer);
+  return `/uploads/${options.objectPath.replace(/\\/g, "/")}`;
+}
+
 export async function uploadPageToSupabaseStorage(options: {
   objectPath: string;
   buffer: Buffer;
@@ -132,6 +147,10 @@ export async function uploadPageToSupabaseStorage(options: {
 }
 
 export async function deletePagesFromSupabaseStorage(pageUrls: string[]) {
+  if (!hasSupabaseBackendConfig()) {
+    return;
+  }
+
   const objectPaths = pageUrls
     .map(objectPathFromPublicUrl)
     .filter((objectPath): objectPath is string => Boolean(objectPath));
@@ -153,6 +172,10 @@ export async function deletePagesFromSupabaseStorage(pageUrls: string[]) {
 }
 
 export async function listPublicationsFromSupabase() {
+  if (!hasSupabaseBackendConfig()) {
+    return { publications: [], editions: [] };
+  }
+
   const [publications, editions] = await Promise.all([
     supabaseRequest<PublicationRecord[]>("/rest/v1/publications?select=id,name&order=name.asc"),
     supabaseRequest<EditionListRecord[]>(
@@ -164,6 +187,10 @@ export async function listPublicationsFromSupabase() {
 }
 
 export async function getEditionFromSupabase(publicationId: string, date: string) {
+  if (!hasSupabaseBackendConfig()) {
+    return null;
+  }
+
   const edition = await supabaseRequest<EditionRecord[]>(
     `/rest/v1/editions?select=publication_id,publication_name,date,edition,page_count,pages,front_page,page_three,back_page,ocr_confidence&publication_id=eq.${encodeURIComponent(publicationId)}&date=eq.${encodeURIComponent(date)}&limit=1`
   );
@@ -171,12 +198,20 @@ export async function getEditionFromSupabase(publicationId: string, date: string
 }
 
 export async function listEditionDatesForPublication(publicationId: string) {
+  if (!hasSupabaseBackendConfig()) {
+    return [];
+  }
+
   return supabaseRequest<{ date: string }[]>(
     `/rest/v1/editions?select=date&publication_id=eq.${encodeURIComponent(publicationId)}`
   );
 }
 
 export async function upsertPublication(publicationId: string, publicationName: string) {
+  if (!hasSupabaseBackendConfig()) {
+    return;
+  }
+
   await supabaseRequest(
     "/rest/v1/publications?on_conflict=id",
     {
@@ -190,6 +225,10 @@ export async function upsertPublication(publicationId: string, publicationName: 
 }
 
 export async function upsertEdition(record: EditionRecord) {
+  if (!hasSupabaseBackendConfig()) {
+    return;
+  }
+
   await supabaseRequest(
     "/rest/v1/editions?on_conflict=publication_id,date",
     {
@@ -203,6 +242,10 @@ export async function upsertEdition(record: EditionRecord) {
 }
 
 export async function deleteEditionFromSupabase(publicationId: string, date: string) {
+  if (!hasSupabaseBackendConfig()) {
+    return;
+  }
+
   await supabaseRequest(
     `/rest/v1/editions?publication_id=eq.${encodeURIComponent(publicationId)}&date=eq.${encodeURIComponent(date)}`,
     {
@@ -215,6 +258,10 @@ export async function deleteEditionFromSupabase(publicationId: string, date: str
 }
 
 export async function deletePublicationFromSupabase(publicationId: string) {
+  if (!hasSupabaseBackendConfig()) {
+    return;
+  }
+
   await supabaseRequest(
     `/rest/v1/publications?id=eq.${encodeURIComponent(publicationId)}`,
     {
@@ -234,6 +281,10 @@ export async function syncLocalEditionToSupabase(options: {
   pages: string[];
   editionDir: string;
 }) {
+  if (!hasSupabaseBackendConfig()) {
+    return;
+  }
+
   const summaryPath = path.join(options.editionDir, "summary.json");
   let summary: {
     frontPage?: EditionStory[];

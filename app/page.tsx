@@ -83,10 +83,11 @@ interface PublicationGroup {
 }
 
 type ViewMode = "desk" | "pages" | "summary";
-type DeskTab = "top" | "clusters" | "gaps" | "assignments" | "review" | "publications";
+type DeskTab = "audit" | "top" | "clusters" | "gaps" | "assignments" | "review" | "publications";
 type StoryStatus = "New" | "Reviewed" | "Assigned" | "In Progress" | "Published" | "Archived";
 type StoryPriority = "Breaking" | "High" | "Normal" | "Low";
 type StorySection = "frontPage" | "pageThree" | "backPage";
+type CoverageStatus = "matched" | "possible" | "not_found" | "baseline";
 
 interface NewsDeskStory {
   id: string;
@@ -123,10 +124,24 @@ interface StoryCluster {
   matches: NewsDeskStory[];
 }
 
+interface CoverageAuditEntry {
+  deskStory: NewsDeskStory;
+  status: CoverageStatus;
+  confidence: number;
+  importanceScore: number;
+  importanceLabel: "Critical" | "High" | "Medium" | "Low";
+  bestDailyStarMatch?: NewsDeskStory;
+  sharedEvidence: string[];
+  conflicts: string[];
+  editorNote: string;
+  actionLabel: string;
+}
+
 const MAIN_PUBLICATION_ID = "daily-star";
 const WORKFLOW_STORAGE_KEY = "editorpulse-newsdesk-workflow-v1";
 
 const deskTabs: { id: DeskTab; label: string; icon: React.ElementType }[] = [
+  { id: "audit", label: "Coverage Audit", icon: AlertTriangle },
   { id: "top", label: "Top Stories", icon: Star },
   { id: "clusters", label: "Clusters", icon: GitCompare },
   { id: "gaps", label: "Daily Star Gaps", icon: AlertTriangle },
@@ -259,6 +274,156 @@ const getDefaultWorkflow = (story: NewsStory): StoryWorkflowState => ({
   updatedAt: new Date().toISOString(),
 });
 
+const getSharedTokens = (story: NewsStory, baseline: NewsStory, limit = 8) => {
+  const right = tokenizeStory(baseline);
+  return Array.from(tokenizeStory(story))
+    .filter((token) => right.has(token))
+    .slice(0, limit);
+};
+
+const getSharedConcepts = (story: NewsStory, baseline: NewsStory) => {
+  const right = getStoryConcepts(baseline);
+  return Array.from(getStoryConcepts(story)).filter((concept) => right.has(concept));
+};
+
+const getImportanceScore = (deskStory: NewsDeskStory) => {
+  const text = normalizeText(`${deskStory.story.title} ${deskStory.story.category} ${deskStory.story.summary}`);
+  let score = 18;
+
+  if (deskStory.section === "frontPage" || deskStory.story.originPage.includes("01")) score += 34;
+  if (deskStory.story.jumpMerged) score += 14;
+  if (text.includes("lead") || text.includes("breaking") || text.includes("গুরুত্বপূর্ণ")) score += 16;
+  if (/(government|minister|court|police|economy|inflation|bank|election|policy|law|budget|crime|worker|wage)/.test(text)) score += 12;
+  if (/(সরকার|মন্ত্রী|আদালত|পুলিশ|অর্থনীতি|মূল্যস্ফীতি|ব্যাংক|নির্বাচন|নীতি|আইন|শ্রমিক|মজুরি)/.test(text)) score += 12;
+  if (deskStory.section === "backPage" && /(sports|cricket|খেলাধুলা|ক্রীড়া|ক্রিকেট)/.test(text)) score -= 12;
+
+  return Math.max(0, Math.min(100, score));
+};
+
+const getImportanceLabel = (score: number): CoverageAuditEntry["importanceLabel"] => {
+  if (score >= 78) return "Critical";
+  if (score >= 58) return "High";
+  if (score >= 36) return "Medium";
+  return "Low";
+};
+
+const getAuditStatusLabel = (status: CoverageStatus) => {
+  if (status === "matched") return "Published by Daily Star";
+  if (status === "possible") return "Needs manual review";
+  if (status === "baseline") return "Daily Star baseline";
+  return "Not found in Daily Star";
+};
+
+const buildCoverageAuditEntry = (
+  deskStory: NewsDeskStory,
+  baselineStories: NewsDeskStory[],
+  peerMatches: StoryMatch[] = []
+): CoverageAuditEntry => {
+  if (deskStory.isMainPublication) {
+    return {
+      deskStory,
+      status: "baseline",
+      confidence: 100,
+      importanceScore: getImportanceScore(deskStory),
+      importanceLabel: getImportanceLabel(getImportanceScore(deskStory)),
+      sharedEvidence: ["This story is from The Daily Star baseline edition."],
+      conflicts: [],
+      editorNote: "Use this as the reference item when checking other publications.",
+      actionLabel: "Baseline",
+    };
+  }
+
+  const candidates = baselineStories
+    .map((baselineStory) => {
+      const score = getSimilarityScore(deskStory.story, baselineStory.story);
+      const sharedTokens = getSharedTokens(deskStory.story, baselineStory.story);
+      const sharedConcepts = getSharedConcepts(deskStory.story, baselineStory.story);
+      const categoryMatches = normalizeText(deskStory.story.category) === normalizeText(baselineStory.story.category);
+      const evidenceCount = sharedTokens.length + sharedConcepts.length + (categoryMatches ? 1 : 0);
+
+      return {
+        baselineStory,
+        score,
+        sharedTokens,
+        sharedConcepts,
+        categoryMatches,
+        evidenceCount,
+      };
+    })
+    .sort((a, b) => b.score - a.score || b.evidenceCount - a.evidenceCount);
+
+  const best = candidates[0];
+  const importanceScore = getImportanceScore(deskStory);
+  const importanceLabel = getImportanceLabel(importanceScore);
+  const supportingPeerCount = peerMatches.filter((match) => match.score >= 24).length;
+
+  if (!best) {
+    return {
+      deskStory,
+      status: "not_found",
+      confidence: 0,
+      importanceScore,
+      importanceLabel,
+      sharedEvidence: peerMatches.length > 0
+        ? [`Also appears related in ${supportingPeerCount || peerMatches.length} other publication item(s).`]
+        : [],
+      conflicts: ["No The Daily Star edition is loaded for this date."],
+      editorNote: "Daily Star baseline is missing, so this cannot be authenticated as covered.",
+      actionLabel: importanceScore >= 58 ? "Check urgently" : "Check manually",
+    };
+  }
+
+  const sharedEvidence = [
+    ...best.sharedConcepts.map((concept) => `Shared topic: ${concept}`),
+    ...best.sharedTokens.slice(0, 5).map((token) => `Shared term: ${token}`),
+  ];
+
+  if (best.categoryMatches) {
+    sharedEvidence.unshift("Category matches the Daily Star candidate.");
+  }
+
+  if (supportingPeerCount > 0) {
+    sharedEvidence.push(`Related item also appears in ${supportingPeerCount} non-Daily-Star publication(s).`);
+  }
+
+  const conflicts: string[] = [];
+  if (best.sharedConcepts.length === 0) conflicts.push("No strong shared news topic with the Daily Star candidate.");
+  if (best.sharedTokens.length < 3) conflicts.push("Too few shared factual terms for a confident match.");
+  if (!best.categoryMatches && best.score < 56) conflicts.push("Category differs or is too broad.");
+
+  const hasStrongEvidence = best.score >= 50 && best.evidenceCount >= 4 && best.sharedConcepts.length > 0;
+  const hasPossibleEvidence = best.score >= 24 && best.evidenceCount >= 2;
+  const status: CoverageStatus = hasStrongEvidence ? "matched" : hasPossibleEvidence ? "possible" : "not_found";
+  const confidence = status === "matched"
+    ? Math.min(96, best.score + best.evidenceCount * 3)
+    : status === "possible"
+      ? Math.min(72, best.score + best.evidenceCount * 2)
+      : Math.min(42, best.score);
+
+  return {
+    deskStory,
+    status,
+    confidence,
+    importanceScore,
+    importanceLabel,
+    bestDailyStarMatch: best.baselineStory,
+    sharedEvidence: sharedEvidence.length > 0 ? sharedEvidence : ["No reliable shared evidence found."],
+    conflicts,
+    editorNote: status === "matched"
+      ? "Daily Star appears to have covered this story. Verify the matched headline before closing it."
+      : status === "possible"
+        ? "There is partial overlap, but not enough evidence to call it covered. Keep this in manual review."
+        : "No authentic Daily Star match found from the uploaded OCR summaries. Treat as a possible missed story.",
+    actionLabel: status === "matched"
+      ? "Verify and close"
+      : status === "possible"
+        ? "Manual review"
+        : importanceScore >= 58
+          ? "Check urgently"
+          : "Consider for follow-up",
+  };
+};
+
 const isNeedsReview = (deskStory: NewsDeskStory, workflow: StoryWorkflowState) =>
   workflow.status === "New" ||
   Boolean(deskStory.story.jumpMerged) ||
@@ -296,163 +461,9 @@ const getPublicationStories = (publication: Publication): NewsDeskStory[] => {
   );
 };
 
-// Hardcoded summary data for existing publications
-const summaryPublications: Publication[] = [
-  {
-    id: "daily-star",
-    name: "The Daily Star",
-    date: "Oct 24, 2023",
-    edition: "Final Print Edition",
-    pageCount: 12,
-    ocrConfidence: 98,
-    frontPage: [
-      {
-        title: "Economy faces new headwinds amid global shifting",
-        subheadline: "Inflation spike poses challenges as imports grow costlier across regional supply chains",
-        byline: "Dhaka Correspondent",
-        author: "Refayet Ullah Mirdha",
-        category: "Lead",
-        originPage: "P.01",
-        jumpMerged: "P.04",
-        summary: "The central bank reported a sudden surge in inflation rates as import costs spiked. Industry experts suggest structural reforms are needed immediately to stabilize currency fluctuations. Additional details from the Page 4 continuation highlight specific tight credit limits and reserve preservation measures deployed by commercial entities.",
-        jumpDetails: "Jump News trace detected: 'Continued on Page 4 Column 3'. OCR aligned and extracted 320 trailing words."
-      },
-      {
-        title: "Renewable Energy Policy: Draft Law Sent to Cabinet",
-        subheadline: "Draft legislation aims at 20% clean grid contribution by 2030 through green incentives",
-        byline: "Secretariat Desk",
-        author: "Senior Correspondent",
-        category: "Policy",
-        originPage: "P.01",
-        summary: "A new legal framework for green energy will see significant tax breaks for solar farms and wind projects across the coastal belt."
-      },
-    ],
-    pageThree: [
-      {
-        title: "NBR scales up online tax filing support with custom portal helpdesks",
-        subheadline: "Custom portal helpdesks set up dynamically across major business zones",
-        byline: "Tax Desk",
-        author: "Ahmed Shovon",
-        category: "National",
-        originPage: "P.03",
-        jumpMerged: "P.04",
-        summary: "The National Board of Revenue launched dedicated helpline centers in major business zones. Tax consultants praise the rapid data reconciliation features.",
-        jumpDetails: "Page 3 Jump Matching Trace: Detected continuation indicator on Page 4 Column 2."
-      },
-    ],
-    backPage: [
-      {
-        title: "Local Sports: National Team Training Camp Begins",
-        subheadline: "Top fast-bowlers placed under special endurance modules",
-        byline: "Sports Correspondent",
-        author: "Mazhar Uddin",
-        category: "Sports",
-        originPage: "P.12",
-        jumpMerged: "P.09",
-        summary: "Players gathered at the National Stadium for an intensive 3-week camp under strict coaching supervision.",
-        jumpDetails: "Jump News trace: 'Sports roundup contd. on Page 9'."
-      },
-    ]
-  },
-  {
-    id: "prothom-alo",
-    name: "প্রথম আলো (Prothom Alo)",
-    date: "Jun 03, 2026",
-    edition: "Dhaka Edition",
-    pageCount: 16,
-    ocrConfidence: 96,
-    frontPage: [
-      {
-        title: "মূল্যস্ফীতি নিয়ন্ত্রণে কঠোর পদক্ষেপের নির্দেশ প্রধানমন্ত্রীর",
-        subheadline: "চালের ওপর আমদানি শুল্ক প্রত্যাহার, মজুতদারদের বিরুদ্ধে আজ থেকেই মোবাইল কোর্টের নির্দেশ",
-        byline: "ঢাকা",
-        author: "শেখ সাবিহা ইয়াসমিন",
-        category: "গুরুত্বপূর্ণ (Lead)",
-        originPage: "P.01",
-        jumpMerged: "P.04",
-        summary: "বাজারে নিত্যপ্রয়োজনীয় পণ্যের দর নিয়ন্ত্রণে কঠোর নির্দেশনা দিয়েছেন প্রধানমন্ত্রী।",
-        jumpDetails: "জাম্প নিউজ ট্র্যাকিং: 'পৃষ্ঠা ৪ কলাম ২-এ বিস্তারিত দেখুন'।"
-      },
-    ],
-    pageThree: [
-      {
-        title: "রাজধানীর বস্তিবাসীদের পুনর্বাসনে ৩০০ নতুন ফ্ল্যাট হস্তান্তর প্রকল্প চূড়ান্ত",
-        subheadline: "আধুনিক সুযোগ-সুবিধা সম্বলিত পরিবেশ বান্ধব আবাসন ব্যবস্থার বাস্তবায়ন",
-        byline: "নগর প্রতিবেদক",
-        author: "আসিফুর রহমান",
-        category: "নগর উন্নয়ন",
-        originPage: "P.03",
-        summary: "সরকারি অর্থায়নে ভাসমান ও নিম্নআয়ের পরিবারের উন্নত আবাসন নিশ্চিত করতে আধুনিক সুযোগ-সুবিধা সম্বলিত ফ্ল্যাট হস্তান্তর শুরু হবে।",
-      },
-    ],
-    backPage: [
-      {
-        title: "টি-টোয়েন্টি বিশ্বকাপ: প্রথম ম্যাচেই জয়ের লক্ষ্য বাংলাদেশের",
-        subheadline: "সহায়ক উইকেটে তিন স্পিনার নিয়ে শক্তিশালী একাদশ",
-        byline: "ক্রীড়া প্রতিবেদক",
-        author: "তারেক মাহমুদ",
-        category: "খেলাধুলা",
-        originPage: "P.16",
-        jumpMerged: "P.11",
-        summary: "তিন স্পিনারের অন্তর্ভুক্তি শক্তিশালী বোলিং লাইনআপ এনে দিয়েছে।",
-        jumpDetails: "জাম্প ট্র্যাকিং: 'ক্রীড়াজগৎ পি.১১'।"
-      },
-    ]
-  },
-  {
-    id: "samakal",
-    name: "সমকাল (Samakal)",
-    date: "Jun 03, 2026",
-    edition: "Dhaka Print",
-    pageCount: 16,
-    ocrConfidence: 97,
-    frontPage: [
-      {
-        title: "তৈরি পোশাক খাতে মজুরি বোর্ড গঠনের দাবি শ্রমিকদের",
-        subheadline: "মূল্যস্ফীতির সঙ্গে সামঞ্জস্য রেখে ন্যূনতম মজুরি ২৫ হাজার টাকা নির্ধারণের দাবি",
-        byline: "ঢাকা",
-        author: "আলামিন হোসেন",
-        category: "জাতীয়",
-        originPage: "P.01",
-        jumpMerged: "P.04",
-        summary: "তৈরি পোশাক খাতের শ্রমিকরা নতুন মজুরি বোর্ড গঠনের দাবি জানিয়েছেন।",
-        jumpDetails: "জাম্প নিউজ ট্র্যাকিং: 'পৃষ্ঠা ৪ কলাম ৫-এ বিস্তারিত দেখুন'।"
-      },
-    ],
-    pageThree: [
-      {
-        title: "ঢাকা ওয়াসা পানির দাম বাড়ানোর প্রস্তাব নাকচ করলো মন্ত্রণালয়",
-        subheadline: "চাহিদা অনুযায়ী সেবা নিশ্চিত না করে অতিরিক্ত বোঝা চাপানো যাবে না",
-        byline: "নগর প্রতিবেদক",
-        author: "তানভীর আহমেদ",
-        category: "নগর উন্নয়ন",
-        originPage: "P.03",
-        summary: "রাজধানীর গ্রাহকদের সুষ্ঠু পানি সরবরাহ নিশ্চিত না করে পানির দাম বাড়ানোর প্রস্তাব গ্রহণযোগ্য নয়।",
-      },
-    ],
-    backPage: [
-      {
-        title: "খেলাধুলা: বড় জয়ে সেমিফাইনালের পথে বাংলাদেশ অনূর্ধ্ব-১৯ দল",
-        subheadline: "ব্যাট-বলে অলরাউন্ড পারফরম্যান্সে দুর্দান্ত খেলে ভারতকে উড়িয়ে দিল যুবারা",
-        byline: "ক্রীড়া প্রতিবেদক",
-        author: "সৈয়দ ফয়েজ আহমেদ",
-        category: "ক্রীড়া",
-        originPage: "P.16",
-        jumpMerged: "P.12",
-        summary: "যুব এশিয়া কাপ ক্রিকেটে আজ বড় ব্যবধানে জয় লাভ করেছে টিম বাংলাদেশ।",
-        jumpDetails: "জাম্প ট্র্যাকিং: 'যুব এশিয়া কাপ কন্টিনুয়েশন পৃষ্ঠা ১২'।"
-      },
-    ]
-  }
-];
+const summaryPublications: Publication[] = [];
 
 export default function Home() {
-  const [isMounted, setIsMounted] = useState(false);
-  useEffect(() => {
-    const handle = setTimeout(() => setIsMounted(true), 0);
-    return () => clearTimeout(handle);
-  }, []);
-
   // Sidebar / navigation
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [selectedPubId, setSelectedPubId] = useState<string>(MAIN_PUBLICATION_ID);
@@ -460,7 +471,7 @@ export default function Home() {
 
   // View mode: "desk" for cross-publication newsroom, "pages" for page viewer, "summary" for story summary
   const [viewMode, setViewMode] = useState<ViewMode>("desk");
-  const [deskTab, setDeskTab] = useState<DeskTab>("top");
+  const [deskTab, setDeskTab] = useState<DeskTab>("audit");
   const [deskSearch, setDeskSearch] = useState("");
   const [deskDate, setDeskDate] = useState<string | null>(null);
   const [deskPublicationFilter, setDeskPublicationFilter] = useState("all");
@@ -469,16 +480,16 @@ export default function Home() {
   const [deskEditionDetails, setDeskEditionDetails] = useState<Publication[]>([]);
   const [isLoadingDeskEditions, setIsLoadingDeskEditions] = useState(false);
   const [deskLoadError, setDeskLoadError] = useState<string | null>(null);
-  const [workflowByStoryId, setWorkflowByStoryId] = useState<Record<string, StoryWorkflowState>>(() => {
-    if (typeof window === "undefined") return {};
+  const [workflowByStoryId, setWorkflowByStoryId] = useState<Record<string, StoryWorkflowState>>({});
 
+  useEffect(() => {
     try {
       const storedWorkflow = window.localStorage.getItem(WORKFLOW_STORAGE_KEY);
-      return storedWorkflow ? JSON.parse(storedWorkflow) : {};
+      setWorkflowByStoryId(storedWorkflow ? JSON.parse(storedWorkflow) : {});
     } catch {
-      return {};
+      setWorkflowByStoryId({});
     }
-  });
+  }, []);
 
   // Page Viewer state
   const [currentPage, setCurrentPage] = useState(0);
@@ -622,7 +633,7 @@ export default function Home() {
   const deskDateOptionsKey = deskDateOptions.join("|");
 
   useEffect(() => {
-    if (deskDate || deskDateOptions.length === 0) return;
+    if (deskDateOptions.length === 0) return;
 
     const dateWithDailyStar = deskDateOptions.find((date) => {
       const editionsForDate = uploadedEditionOptions.filter((edition) => edition.date === date);
@@ -630,7 +641,12 @@ export default function Home() {
         editionsForDate.length > 1;
     });
 
-    setDeskDate(dateWithDailyStar || selectedDate || deskDateOptions[0]);
+    const selectedDateIsAvailable = selectedDate && deskDateOptions.includes(selectedDate);
+    const nextDeskDate = dateWithDailyStar || (selectedDateIsAvailable ? selectedDate : null) || deskDateOptions[0];
+
+    if (!deskDate || !deskDateOptions.includes(deskDate)) {
+      setDeskDate(nextDeskDate);
+    }
   }, [deskDate, deskDateOptions, deskDateOptionsKey, selectedDate, uploadedEditionOptions]);
 
   useEffect(() => {
@@ -790,31 +806,7 @@ export default function Home() {
     }
   }, [currentPage]);
 
-  // Get active summary publication (dynamic from API if available, otherwise fallback to hardcoded mocks)
-  const activeSummaryPub = (editionMeta && editionMeta.frontPage && editionMeta.frontPage.length > 0)
-    ? {
-        id: editionMeta.publicationId,
-        name: editionMeta.publicationName,
-        date: editionMeta.date,
-        edition: editionMeta.edition,
-        pageCount: editionMeta.pageCount || pageImages.length,
-        frontPage: editionMeta.frontPage || [],
-        pageThree: editionMeta.pageThree || [],
-        backPage: editionMeta.backPage || [],
-        ocrConfidence: editionMeta.ocrConfidence || 95,
-        isDynamic: true,
-      }
-    : (summaryPublications.find(p => p.id === selectedPubId) || summaryPublications[0]);
-
-  const isProthomAlo = selectedPubId === "prothom-alo" || activeSummaryPub.name.toLowerCase().includes("prothom") || activeSummaryPub.name.includes("প্রথম আলো");
-
-  const pageThreeLabel = (activeSummaryPub.pageThree && activeSummaryPub.pageThree.length > 0 && activeSummaryPub.pageThree[0].originPage)
-    ? activeSummaryPub.pageThree[0].originPage
-    : (isProthomAlo ? "P.02" : "P.03");
-
-  const pageThreeTitle = (activeSummaryPub.pageThree && activeSummaryPub.pageThree.length > 0 && activeSummaryPub.pageThree[0].originPage)
-    ? `Page ${activeSummaryPub.pageThree[0].originPage.replace("P.", "").replace("P", "")}`
-    : (isProthomAlo ? "Page 2" : "Page 3");
+  const selectedPublicationGroup = uploadedPubs.find((publication) => publication.id === selectedPubId);
 
   const dynamicSummaryPublication: Publication | null = (editionMeta && editionMeta.frontPage && editionMeta.frontPage.length > 0)
     ? {
@@ -829,6 +821,29 @@ export default function Home() {
         ocrConfidence: editionMeta.ocrConfidence || 95,
       }
     : null;
+
+  const activeSummaryPub = dynamicSummaryPublication || {
+    id: selectedPubId,
+    name: selectedPublicationGroup?.name || "No publication selected",
+    date: selectedDate || deskDate || "",
+    edition: "",
+    pageCount: 0,
+    frontPage: [],
+    pageThree: [],
+    backPage: [],
+    ocrConfidence: 0,
+    isDynamic: false,
+  };
+
+  const isProthomAlo = selectedPubId === "prothom-alo" || activeSummaryPub.name.toLowerCase().includes("prothom") || activeSummaryPub.name.includes("প্রথম আলো");
+
+  const pageThreeLabel = (activeSummaryPub.pageThree && activeSummaryPub.pageThree.length > 0 && activeSummaryPub.pageThree[0].originPage)
+    ? activeSummaryPub.pageThree[0].originPage
+    : (isProthomAlo ? "P.02" : "P.03");
+
+  const pageThreeTitle = (activeSummaryPub.pageThree && activeSummaryPub.pageThree.length > 0 && activeSummaryPub.pageThree[0].originPage)
+    ? `Page ${activeSummaryPub.pageThree[0].originPage.replace("P.", "").replace("P", "")}`
+    : (isProthomAlo ? "Page 2" : "Page 3");
 
   const sameDateSummaryPublications = deskDate
     ? summaryPublications.filter((publication) => publication.date === deskDate)
@@ -979,29 +994,51 @@ export default function Home() {
     ])
   );
 
-  const coverageGapStories = filteredDeskStories.filter((deskStory) => {
-    const workflow = getWorkflow(deskStory);
-    const peerMatches = peerMatchesByStoryId.get(deskStory.id) || [];
-    return !deskStory.isMainPublication &&
-      deskStory.comparisonScore < 18 &&
-      isImportantDeskStory(deskStory, workflow) &&
-      (peerMatches.length > 0 || workflow.priority === "Breaking" || workflow.priority === "High");
-  });
+  const allCoverageAuditEntries = deskStories
+    .filter((deskStory) => !deskStory.isMainPublication)
+    .map((deskStory) => buildCoverageAuditEntry(deskStory, baselineStories, peerMatchesByStoryId.get(deskStory.id) || []));
+
+  const coverageAuditEntries = filteredDeskStories
+    .filter((deskStory) => !deskStory.isMainPublication)
+    .map((deskStory) => buildCoverageAuditEntry(deskStory, baselineStories, peerMatchesByStoryId.get(deskStory.id) || []))
+    .sort((a, b) => (
+      Number(b.status === "not_found") - Number(a.status === "not_found") ||
+      Number(b.status === "possible") - Number(a.status === "possible") ||
+      b.importanceScore - a.importanceScore ||
+      a.confidence - b.confidence
+    ));
+
+  const coverageAuditByStoryId = new Map(coverageAuditEntries.map((entry) => [entry.deskStory.id, entry]));
+  const missedAuditEntries = coverageAuditEntries.filter((entry) => entry.status === "not_found");
+  const possibleAuditEntries = coverageAuditEntries.filter((entry) => entry.status === "possible");
+  const matchedAuditEntries = coverageAuditEntries.filter((entry) => entry.status === "matched");
+  const urgentMissedAuditEntries = missedAuditEntries.filter((entry) => entry.importanceScore >= 58);
+
+  const coverageGapStories = missedAuditEntries
+    .filter((entry) => entry.importanceScore >= 36)
+    .map((entry) => entry.deskStory);
 
   const reviewQueueStories = filteredDeskStories.filter((deskStory) => (
-    isNeedsReview(deskStory, getWorkflow(deskStory))
+    isNeedsReview(deskStory, getWorkflow(deskStory)) ||
+    coverageAuditByStoryId.get(deskStory.id)?.status === "possible"
   ));
 
   const assignedStories = filteredDeskStories.filter((deskStory) => getWorkflow(deskStory).assignedTo !== "Unassigned");
 
-  const totalMatches = deskStories.filter((deskStory) => !deskStory.isMainPublication && deskStory.comparisonScore >= 18).length;
+  const totalMatches = allCoverageAuditEntries.filter((entry) => entry.status === "matched").length;
   const dailyStarStoryCount = deskStories.filter((deskStory) => deskStory.isMainPublication).length;
-  const needsReviewCount = deskStories.filter((deskStory) => isNeedsReview(deskStory, getWorkflow(deskStory))).length;
+  const needsReviewCount = deskStories.filter((deskStory) => (
+    isNeedsReview(deskStory, getWorkflow(deskStory)) ||
+    allCoverageAuditEntries.some((entry) => entry.deskStory.id === deskStory.id && entry.status === "possible")
+  )).length;
   const hasDailyStarBaseline = dailyStarStoryCount > 0;
 
   const publicationScorecards = deskPublications.map((publication) => {
     const publicationStories = deskStories.filter((deskStory) => deskStory.publicationId === publication.id);
-    const matchedStories = publicationStories.filter((deskStory) => deskStory.isMainPublication || deskStory.comparisonScore >= 18).length;
+    const publicationAuditEntries = allCoverageAuditEntries.filter((entry) => entry.deskStory.publicationId === publication.id);
+    const matchedStories = isDailyStarPublication(publication.id, publication.name)
+      ? publicationStories.length
+      : publicationAuditEntries.filter((entry) => entry.status === "matched").length;
     const highPriorityStories = publicationStories.filter((deskStory) => {
       const priority = getWorkflow(deskStory).priority;
       return priority === "Breaking" || priority === "High";
@@ -1011,7 +1048,7 @@ export default function Home() {
       publication,
       storyCount: publicationStories.length,
       matchedStories,
-      uniqueStories: publicationStories.filter((deskStory) => !deskStory.isMainPublication && deskStory.comparisonScore < 18).length,
+      uniqueStories: publicationAuditEntries.filter((entry) => entry.status === "not_found").length,
       highPriorityStories,
       matchRate: publicationStories.length > 0 ? Math.round((matchedStories / publicationStories.length) * 100) : 0,
     };
@@ -1164,10 +1201,165 @@ export default function Home() {
     return "bg-white text-slate-700 border-slate-200";
   };
 
+  const getCoverageClasses = (status: CoverageStatus) => {
+    if (status === "matched") return "bg-emerald-50 text-emerald-700 border-emerald-200";
+    if (status === "possible") return "bg-amber-50 text-amber-800 border-amber-200";
+    if (status === "baseline") return "bg-amber-50 text-amber-800 border-amber-200";
+    return "bg-rose-50 text-rose-700 border-rose-200";
+  };
+
+  const renderCoverageAuditCard = (entry: CoverageAuditEntry) => {
+    const workflow = getWorkflow(entry.deskStory);
+
+    return (
+      <article
+        key={entry.deskStory.id}
+        className={cn(
+          "rounded-3xl border bg-white p-4 shadow-sm md:p-5",
+          entry.status === "not_found" && "border-rose-200 ring-1 ring-rose-100",
+          entry.status === "possible" && "border-amber-200 ring-1 ring-amber-100",
+          entry.status === "matched" && "border-emerald-200",
+        )}
+      >
+        <div className="flex flex-col gap-4 xl:grid xl:grid-cols-[1fr_360px]">
+          <div className="space-y-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className={cn("rounded-full border px-2.5 py-1 text-[10px] font-black uppercase tracking-widest", getCoverageClasses(entry.status))}>
+                {getAuditStatusLabel(entry.status)}
+              </span>
+              <span className="rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1 text-[10px] font-black uppercase tracking-widest text-slate-600">
+                {entry.importanceLabel} importance
+              </span>
+              <span className="rounded-full bg-slate-100 px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider text-slate-500">
+                {entry.deskStory.publicationName} • {entry.deskStory.story.originPage}
+              </span>
+            </div>
+
+            <button type="button" onClick={() => setSelectedStory(entry.deskStory.story)} className="block text-left">
+              <h3 className="text-lg font-black leading-tight tracking-tight text-slate-950 transition hover:text-emerald-700 md:text-xl">
+                {entry.deskStory.story.title}
+              </h3>
+              {entry.deskStory.story.subheadline && (
+                <p className="mt-1.5 text-sm italic leading-relaxed text-slate-500">
+                  {entry.deskStory.story.subheadline}
+                </p>
+              )}
+            </button>
+
+            <p className="line-clamp-3 text-sm leading-relaxed text-slate-600">
+              {entry.deskStory.story.summary}
+            </p>
+
+            <div className="grid gap-2 sm:grid-cols-3">
+              <div className="rounded-2xl bg-slate-50 p-3">
+                <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Confidence</p>
+                <p className="mt-1 font-mono text-2xl font-black text-slate-950">{entry.confidence}%</p>
+              </div>
+              <div className="rounded-2xl bg-slate-50 p-3">
+                <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Importance</p>
+                <p className="mt-1 font-mono text-2xl font-black text-slate-950">{entry.importanceScore}</p>
+              </div>
+              <div className="rounded-2xl bg-slate-50 p-3">
+                <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Action</p>
+                <p className="mt-1 text-sm font-black leading-tight text-slate-900">{entry.actionLabel}</p>
+              </div>
+            </div>
+
+            <div className="grid gap-2 md:grid-cols-3" onClick={(event) => event.stopPropagation()}>
+              <label className="space-y-1">
+                <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">Status</span>
+                <select
+                  value={workflow.status}
+                  onChange={(event) => updateWorkflow(entry.deskStory, { status: event.target.value as StoryStatus })}
+                  className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-bold text-slate-700 outline-none focus:border-emerald-400"
+                >
+                  {statusOptions.map((status) => (
+                    <option key={status} value={status}>{status}</option>
+                  ))}
+                </select>
+              </label>
+              <label className="space-y-1">
+                <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">Priority</span>
+                <select
+                  value={workflow.priority}
+                  onChange={(event) => updateWorkflow(entry.deskStory, { priority: event.target.value as StoryPriority })}
+                  className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-bold text-slate-700 outline-none focus:border-emerald-400"
+                >
+                  {priorityOptions.map((priority) => (
+                    <option key={priority} value={priority}>{priority}</option>
+                  ))}
+                </select>
+              </label>
+              <label className="space-y-1">
+                <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">Assign</span>
+                <select
+                  value={workflow.assignedTo}
+                  onChange={(event) => {
+                    const assignedTo = event.target.value;
+                    updateWorkflow(entry.deskStory, {
+                      assignedTo,
+                      status: assignedTo === "Unassigned" ? workflow.status : "Assigned",
+                    });
+                  }}
+                  className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-bold text-slate-700 outline-none focus:border-emerald-400"
+                >
+                  {assigneeOptions.map((assignee) => (
+                    <option key={assignee} value={assignee}>{assignee}</option>
+                  ))}
+                </select>
+              </label>
+            </div>
+          </div>
+
+          <aside className="space-y-3 rounded-2xl border border-slate-200 bg-slate-50 p-4">
+            {entry.bestDailyStarMatch && (
+              <button
+                type="button"
+                onClick={() => setSelectedStory(entry.bestDailyStarMatch!.story)}
+                className="w-full rounded-xl border border-amber-100 bg-amber-50 p-3 text-left transition hover:bg-amber-100"
+              >
+                <p className="text-[10px] font-black uppercase tracking-widest text-amber-700">Best Daily Star candidate</p>
+                <p className="mt-1 line-clamp-3 text-sm font-black leading-snug text-slate-950">
+                  {entry.bestDailyStarMatch.story.title}
+                </p>
+              </button>
+            )}
+
+            <div className="rounded-xl bg-white p-3">
+              <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Evidence used</p>
+              <ul className="mt-2 space-y-1.5 text-xs font-semibold leading-relaxed text-slate-700">
+                {entry.sharedEvidence.slice(0, 5).map((item) => (
+                  <li key={item}>- {item}</li>
+                ))}
+              </ul>
+            </div>
+
+            {entry.conflicts.length > 0 && (
+              <div className="rounded-xl bg-white p-3">
+                <p className="text-[10px] font-black uppercase tracking-widest text-rose-500">Why not auto-close</p>
+                <ul className="mt-2 space-y-1.5 text-xs font-semibold leading-relaxed text-slate-700">
+                  {entry.conflicts.slice(0, 4).map((item) => (
+                    <li key={item}>- {item}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            <div className="rounded-xl bg-white p-3">
+              <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Editor note</p>
+              <p className="mt-2 text-xs font-semibold leading-relaxed text-slate-700">{entry.editorNote}</p>
+            </div>
+          </aside>
+        </div>
+      </article>
+    );
+  };
+
   const renderDeskStoryCard = (deskStory: NewsDeskStory, compact = false) => {
     const workflow = getWorkflow(deskStory);
     const needsReview = isNeedsReview(deskStory, workflow);
     const peerMatches = peerMatchesByStoryId.get(deskStory.id) || [];
+    const auditEntry = coverageAuditByStoryId.get(deskStory.id);
 
     return (
       <article
@@ -1232,12 +1424,17 @@ export default function Home() {
                 Daily Star Compare
               </div>
               <p className="text-xs font-bold text-slate-800">
-                {deskStory.comparisonLabel}
-                {!deskStory.isMainPublication && ` • ${deskStory.comparisonScore}%`}
+                {auditEntry ? getAuditStatusLabel(auditEntry.status) : deskStory.comparisonLabel}
+                {!deskStory.isMainPublication && ` • ${auditEntry ? auditEntry.confidence : deskStory.comparisonScore}%`}
               </p>
               {deskStory.mainMatchTitle && (
                 <p className="mt-1 text-[11px] leading-relaxed text-slate-500 line-clamp-2">
                   Baseline: {deskStory.mainMatchTitle}
+                </p>
+              )}
+              {auditEntry && auditEntry.status !== "matched" && (
+                <p className="mt-1 text-[11px] leading-relaxed text-slate-500 line-clamp-2">
+                  {auditEntry.editorNote}
                 </p>
               )}
             </div>
@@ -1328,17 +1525,6 @@ export default function Home() {
       </article>
     );
   };
-
-  if (!isMounted) {
-    return (
-      <div className="min-h-screen bg-slate-900 flex items-center justify-center font-mono text-slate-400">
-        <div className="flex flex-col items-center gap-4 animate-pulse">
-          <div className="w-10 h-10 border-4 border-blue-500 border-t-transparent rounded-full animate-spin" />
-          <p className="text-sm">Initializing EditorPulse Dashboard...</p>
-        </div>
-      </div>
-    );
-  }
 
   return (
     <div
@@ -1626,8 +1812,8 @@ export default function Home() {
                         { label: "All Stories", value: deskStories.length, icon: Newspaper },
                         { label: "Daily Star", value: dailyStarStoryCount, icon: Star },
                         { label: "Matched", value: totalMatches, icon: GitCompare },
-                        { label: "DS Gaps", value: coverageGapStories.length, icon: AlertTriangle },
-                        { label: "Review", value: needsReviewCount, icon: AlertTriangle },
+                        { label: "Missed", value: missedAuditEntries.length, icon: AlertTriangle },
+                        { label: "Review", value: possibleAuditEntries.length + needsReviewCount, icon: AlertTriangle },
                       ].map((metric) => (
                         <div key={metric.label} className="rounded-2xl border border-white/10 bg-white/8 p-4 backdrop-blur">
                           <div className="mb-2 flex items-center justify-between text-slate-300">
@@ -1744,6 +1930,110 @@ export default function Home() {
                   ))}
                 </div>
               </section>
+
+              {deskTab === "audit" && (
+                <section className="space-y-5">
+                  <div className="grid gap-4 lg:grid-cols-[1fr_380px]">
+                    <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
+                      <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                        <div>
+                          <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Daily Star Coverage Audit</p>
+                          <h2 className="mt-1 text-2xl font-black tracking-tight text-slate-950">
+                            Stories other papers carried that Daily Star may have missed.
+                          </h2>
+                          <p className="mt-2 max-w-3xl text-sm font-semibold leading-relaxed text-slate-500">
+                            This audit only compares uploaded OCR summaries from the selected date. A story is marked covered only when there is enough shared evidence; weak overlap stays in manual review.
+                          </p>
+                        </div>
+                        <span className="w-fit rounded-full bg-slate-950 px-3 py-1.5 text-xs font-black uppercase tracking-widest text-white">
+                          {deskDate || "No date"}
+                        </span>
+                      </div>
+
+                      <div className="mt-5 grid gap-3 sm:grid-cols-4">
+                        <div className="rounded-2xl bg-rose-50 p-4">
+                          <p className="text-[10px] font-black uppercase tracking-widest text-rose-700">Not found</p>
+                          <p className="mt-1 font-mono text-3xl font-black text-rose-950">{missedAuditEntries.length}</p>
+                        </div>
+                        <div className="rounded-2xl bg-red-50 p-4">
+                          <p className="text-[10px] font-black uppercase tracking-widest text-red-700">Urgent</p>
+                          <p className="mt-1 font-mono text-3xl font-black text-red-950">{urgentMissedAuditEntries.length}</p>
+                        </div>
+                        <div className="rounded-2xl bg-amber-50 p-4">
+                          <p className="text-[10px] font-black uppercase tracking-widest text-amber-700">Review</p>
+                          <p className="mt-1 font-mono text-3xl font-black text-amber-950">{possibleAuditEntries.length}</p>
+                        </div>
+                        <div className="rounded-2xl bg-emerald-50 p-4">
+                          <p className="text-[10px] font-black uppercase tracking-widest text-emerald-700">Covered</p>
+                          <p className="mt-1 font-mono text-3xl font-black text-emerald-950">{matchedAuditEntries.length}</p>
+                        </div>
+                      </div>
+                    </div>
+
+                    <aside className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
+                      <div className="mb-3 flex items-center gap-2">
+                        <CheckCircle2 className="h-5 w-5 text-emerald-600" />
+                        <h3 className="font-black text-slate-950">Authenticity Rules</h3>
+                      </div>
+                      <div className="space-y-3 text-xs font-semibold leading-relaxed text-slate-600">
+                        <p>Same date only. Different editions are never mixed into the audit.</p>
+                        <p>Confirmed coverage needs shared topic plus multiple factual terms, not just a broad category match.</p>
+                        <p>Low-confidence overlap is kept in manual review so editors are not pushed into false certainty.</p>
+                      </div>
+                    </aside>
+                  </div>
+
+                  {coverageAuditEntries.length > 0 ? (
+                    <div className="space-y-4">
+                      {missedAuditEntries.length > 0 && (
+                        <div className="space-y-3">
+                          <div className="flex items-center justify-between">
+                            <h3 className="text-lg font-black tracking-tight text-slate-950">Not Found In Daily Star</h3>
+                            <span className="rounded-full bg-rose-50 px-3 py-1 text-xs font-black uppercase tracking-widest text-rose-700">
+                              {missedAuditEntries.length}
+                            </span>
+                          </div>
+                          {missedAuditEntries.map(renderCoverageAuditCard)}
+                        </div>
+                      )}
+
+                      {possibleAuditEntries.length > 0 && (
+                        <div className="space-y-3">
+                          <div className="flex items-center justify-between">
+                            <h3 className="text-lg font-black tracking-tight text-slate-950">Needs Manual Review</h3>
+                            <span className="rounded-full bg-amber-50 px-3 py-1 text-xs font-black uppercase tracking-widest text-amber-700">
+                              {possibleAuditEntries.length}
+                            </span>
+                          </div>
+                          {possibleAuditEntries.map(renderCoverageAuditCard)}
+                        </div>
+                      )}
+
+                      {matchedAuditEntries.length > 0 && (
+                        <div className="space-y-3">
+                          <div className="flex items-center justify-between">
+                            <h3 className="text-lg font-black tracking-tight text-slate-950">Published By Daily Star</h3>
+                            <span className="rounded-full bg-emerald-50 px-3 py-1 text-xs font-black uppercase tracking-widest text-emerald-700">
+                              {matchedAuditEntries.length}
+                            </span>
+                          </div>
+                          <div className="grid gap-3 lg:grid-cols-2">
+                            {matchedAuditEntries.map(renderCoverageAuditCard)}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="rounded-3xl border border-dashed border-slate-300 bg-white p-10 text-center">
+                      <Search className="mx-auto mb-3 h-10 w-10 text-slate-300" />
+                      <h3 className="font-black text-slate-900">No audit items for this date</h3>
+                      <p className="mt-1 text-sm text-slate-500">
+                        Upload The Daily Star and at least one other publication for the same date to run the coverage audit.
+                      </p>
+                    </div>
+                  )}
+                </section>
+              )}
 
               {deskTab === "top" && (
                 <section className="grid gap-4 xl:grid-cols-[1fr_360px]">

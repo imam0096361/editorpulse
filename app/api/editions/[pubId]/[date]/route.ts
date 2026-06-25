@@ -17,34 +17,37 @@ function isSafePathSegment(value: string) {
 }
 
 function getLocalEdition(pubId: string, date: string) {
+  const pubPath = path.join(UPLOADS_DIR, pubId);
   const datePath = path.join(UPLOADS_DIR, pubId, date);
+  const manifestPath = path.join(pubPath, "manifest.json");
+  let manifest: any = null;
+  let editionMeta: any = null;
 
-  if (!fs.existsSync(datePath)) {
-    return null;
-  }
-
-  const imageFiles = fs.readdirSync(datePath)
-    .filter((f) => /\.(png|jpg|jpeg|webp)$/i.test(f))
-    .sort((a, b) => {
-      const numA = parseInt(a.match(/\d+/)?.[0] || "0");
-      const numB = parseInt(b.match(/\d+/)?.[0] || "0");
-      return numA - numB;
-    });
-
-  const pages = imageFiles.map((f) => `/uploads/${pubId}/${date}/${f}`);
-  const manifestPath = path.join(UPLOADS_DIR, pubId, "manifest.json");
-  let editionMeta: any = {};
   if (fs.existsSync(manifestPath)) {
     try {
-      const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf-8"));
-      const edition = manifest.editions?.find((e: any) => e.date === date);
-      if (edition) {
-        editionMeta = edition;
-      }
+      manifest = JSON.parse(fs.readFileSync(manifestPath, "utf-8"));
+      editionMeta = manifest.editions?.find((edition: any) => edition.date === date) || null;
     } catch {
-      // ignore
+      manifest = null;
+      editionMeta = null;
     }
   }
+
+  const imageFiles = fs.existsSync(datePath)
+    ? fs.readdirSync(datePath)
+        .filter((f) => /\.(png|jpg|jpeg|webp)$/i.test(f))
+        .sort((a, b) => {
+          const numA = parseInt(a.match(/\d+/)?.[0] || "0");
+          const numB = parseInt(b.match(/\d+/)?.[0] || "0");
+          return numA - numB;
+        })
+    : [];
+
+  const pages = imageFiles.length > 0
+    ? imageFiles.map((f) => `/uploads/${pubId}/${date}/${f}`)
+    : Array.isArray(editionMeta?.pages)
+      ? editionMeta.pages
+      : [];
 
   const summaryPath = path.join(datePath, "summary.json");
   let summaryData: any = {};
@@ -56,12 +59,16 @@ function getLocalEdition(pubId: string, date: string) {
     }
   }
 
+  if (pages.length === 0 && !editionMeta && Object.keys(summaryData).length === 0) {
+    return null;
+  }
+
   return {
     publicationId: pubId,
-    publicationName: editionMeta.publicationName || summaryData.publicationName || pubId,
+    publicationName: manifest?.publicationName || summaryData.publicationName || pubId,
     date,
-    edition: editionMeta.edition || summaryData.edition || "Standard Edition",
-    pageCount: pages.length,
+    edition: editionMeta?.edition || summaryData.edition || "Standard Edition",
+    pageCount: editionMeta?.pageCount || pages.length,
     pages,
     frontPage: summaryData.frontPage || [],
     pageThree: summaryData.pageThree || [],

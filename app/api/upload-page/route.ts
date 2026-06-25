@@ -1,6 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { isAdminRequestAuthorized } from "@/lib/admin-auth";
-import { uploadPageToSupabaseStorage } from "@/lib/editorpulse-backend";
+import {
+  hasSupabaseBackendConfig,
+  savePageToLocalUploads,
+  uploadPageToSupabaseStorage,
+} from "@/lib/editorpulse-backend";
 
 export const maxDuration = 60;
 
@@ -48,11 +52,16 @@ export async function POST(req: NextRequest) {
     const buffer = Buffer.from(await file.arrayBuffer());
     const ext = extensionForFile(file);
     const objectPath = `${publicationId}/${date}/page-${String(pageIndex + 1).padStart(2, "0")}.${ext}`;
-    const pageUrl = await uploadPageToSupabaseStorage({
-      objectPath,
-      buffer,
-      contentType: file.type || (ext === "jpg" ? "image/jpeg" : `image/${ext}`),
-    });
+    const pageUrl = hasSupabaseBackendConfig()
+      ? await uploadPageToSupabaseStorage({
+          objectPath,
+          buffer,
+          contentType: file.type || (ext === "jpg" ? "image/jpeg" : `image/${ext}`),
+        })
+      : savePageToLocalUploads({
+          objectPath,
+          buffer,
+        });
 
     return NextResponse.json({
       success: true,

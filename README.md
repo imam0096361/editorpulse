@@ -6,8 +6,20 @@
 1. Install dependencies:
    `pnpm install`
 2. Set the required variables in `.env.local`
+   Local-only minimum:
+   - `GEMINI_API_KEY`
+   - `ADMIN_USERNAME`
+   - `ADMIN_PASSWORD`
+   - `ADMIN_SESSION_SECRET`
+   Optional for local:
+   - `GEMINI_OCR_MODEL`
+   - `GEMINI_JUMP_MODEL`
+   - `APP_URL`
+   - All Supabase variables
 3. Run the app:
    `pnpm dev`
+
+When Supabase env vars are unset, uploads and summaries are stored locally under `public/uploads`. When Supabase env vars are present, the app keeps the current Supabase storage and sync behavior.
 
 ## Deploy on Dokploy
 
@@ -29,15 +41,18 @@ Required environment variables for production:
 - `GEMINI_API_KEY`
 - `GEMINI_OCR_MODEL`
 - `GEMINI_JUMP_MODEL`
+- `ADMIN_USERNAME`
+- `ADMIN_PASSWORD`
+- `ADMIN_SESSION_SECRET`
+- `APP_URL`
+
+Optional but recommended for production persistence and cross-instance sync:
+
 - `NEXT_PUBLIC_SUPABASE_URL`
 - `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`
 - `NEXT_PUBLIC_SUPABASE_ANON_KEY`
 - `SUPABASE_STORAGE_BUCKET`
 - `EDITORPULSE_API_KEY`
-- `ADMIN_USERNAME`
-- `ADMIN_PASSWORD`
-- `ADMIN_SESSION_SECRET`
-- `APP_URL`
 
 Recommended production values:
 

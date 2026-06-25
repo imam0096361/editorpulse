@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { verifyAdminSessionToken } from "@/lib/admin-auth";
 
 const ADMIN_PATH_PREFIX = "/admin";
-const PROTECTED_API_PREFIXES = ["/api/upload", "/api/seed", "/api/admin"];
+const PROTECTED_API_PREFIXES = ["/api/upload", "/api/admin"];
 const PUBLIC_ADMIN_PATHS = ["/admin/login", "/api/admin/login", "/api/admin/session"];
 
 function isProtectedApiPath(pathname: string) {
@@ -40,5 +40,5 @@ export async function middleware(req: NextRequest) {
 }
 
 export const config = {
-  matcher: ["/admin/:path*", "/api/upload/:path*", "/api/seed/:path*", "/api/admin/:path*"],
+  matcher: ["/admin/:path*", "/api/upload/:path*", "/api/admin/:path*"],
 };

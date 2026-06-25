@@ -1,10 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 import fs from "fs";
-import os from "os";
 import path from "path";
 import { GoogleGenAI, Type } from "@google/genai";
 import { isAdminRequestAuthorized } from "@/lib/admin-auth";
-import { syncLocalEditionToSupabase, uploadPageToSupabaseStorage } from "@/lib/editorpulse-backend";
+import {
+  hasSupabaseBackendConfig,
+  savePageToLocalUploads,
+  syncLocalEditionToSupabase,
+  uploadPageToSupabaseStorage,
+} from "@/lib/editorpulse-backend";
 
 const UPLOADS_DIR = path.join(process.cwd(), "public", "uploads");
 const DEFAULT_GEMINI_OCR_MODEL = "gemini-2.5-flash";
@@ -94,7 +98,7 @@ function getLanguageLockInstruction(outputLanguage: string) {
 - Keep names, quoted terms, institutions, and numbers faithful to the printed article.`;
 }
 
-export function parseOcrPages(input: string, totalPages: number): number[] {
+function parseOcrPages(input: string, totalPages: number): number[] {
   const pages = new Set<number>();
   const parts = input.split(",").map(p => p.trim().toLowerCase());
   
@@ -240,7 +244,7 @@ Do not include markdown formatting or backticks outside of the JSON block itself
   }
 }
 
-export async function runGeminiOCR(
+async function runGeminiOCR(
   pubId: string,
   publicationName: string,
   date: string,
@@ -252,10 +256,6 @@ export async function runGeminiOCR(
 ) {
   const summaryPath = path.join(editionDir, "summary.json");
   
-  // Rule mapping
-  const isProthomAlo = pubId === "prothom-alo" || publicationName.toLowerCase().includes("prothom") || publicationName.includes("প্রথম আলো");
-  const isDailyStar = pubId === "daily-star" || publicationName.toLowerCase().includes("daily star");
-  const isSamakal = pubId === "samakal" || publicationName.toLowerCase().includes("samakal") || publicationName.includes("সমকাল");
   const outputLanguage = getPublicationOutputLanguage(pubId, publicationName);
   const languageLockInstruction = getLanguageLockInstruction(outputLanguage);
 
@@ -312,95 +312,7 @@ ${categorizationInstructions}
 Ensure the resulting summaries act as an authoritative and complete digest allowing any reader to fully understand the entire issue without requiring external context. Output conforming strictly to the requested JSON schema. Do not include markdown formatting or backticks outside of the JSON block itself.`;
 
   if (!process.env.GEMINI_API_KEY) {
-    console.warn("GEMINI_API_KEY is not set. Generating mock summaries for development.");
-    
-    // Generate simulated summaries matching configuration
-    const simulatedData = {
-      publicationName,
-      date,
-      edition,
-      frontPage: [
-        {
-          title: isSamakal
-            ? "তৈরি পোশাক খাতে মজুরি বোর্ড গঠনের দাবি শ্রমিকদের"
-            : isProthomAlo
-            ? "মুদ্রাস্ফীতি নিয়ন্ত্রণে কঠোর পদক্ষেপের নির্দেশ প্রধানমন্ত্রীর"
-            : "Inflationary pressures reshape national budget outlook and fiscal allocations",
-          subheadline: isSamakal
-            ? "মূল্যস্ফীতির সঙ্গে সামঞ্জস্য রেখে ন্যূনতম মজুরি ২৫ হাজার টাকা নির্ধারণের দাবি"
-            : isProthomAlo
-            ? "চালের ওপর আমদানি শুল্ক প্রত্যাহার, মজুতদারদের বিরুদ্ধে আজ থেকেই মোবাইল কোর্টের নির্দেশ"
-            : "Finance ministry braces for strict structural guidelines to stabilize reserves",
-          byline: isDailyStar ? "Dhaka, Bangladesh" : "ঢাকা",
-          author: isSamakal ? "আলামিন হোসেন" : isProthomAlo ? "শেখ সাবিহা ইয়াসমিন" : "Refayet Ullah Mirdha",
-          category: isDailyStar ? "Lead News" : "জাতীয়",
-          summary: isSamakal
-            ? "তৈরি পোশাক খাতের শ্রমিকরা নতুন মজুরি বোর্ড গঠনের দাবি জানিয়েছেন। জীবনযাত্রার ব্যয় বৃদ্ধি ও লাগামহীন মূল্যস্ফীতির কারণে ন্যূনতম মজুরি ২৫ হাজার টাকা করার জোর দাবি জানানো হয়। পৃষ্ঠা ৪-এর বিস্তারিত অনুযায়ী, বিভিন্ন শ্রমিক সংগঠনের প্রতিনিধিরা আজ সকালে জাতীয় প্রেসক্লাবের সামনে আয়োজিত মানববন্ধন ও সমাবেশ থেকে এই আল্টিমেটাম দেন।"
-            : isProthomAlo
-            ? "প্রধানমন্ত্রীর নির্দেশনায় চাল ও অন্যান্য নিত্যপ্রয়োজনীয় পণ্য আমদানির ক্ষেত্রে শুল্ক ছাড় দেওয়ার ঘোষণা দেওয়া হয়েছে। বাজারে কৃত্রিম সংকট সৃষ্টিকারী মজুতদারদের বিরুদ্ধে আজ থেকেই মোবাইল কোর্ট পরিচালনার নির্দেশ দেওয়া হয়েছে। পৃষ্ঠা ৪-এর বিবরণ অনুযায়ী, খাদ্য মন্ত্রণালয় বিশেষ মনিটরিং সেল গঠন করেছে এবং কোনো অনিয়ম পেলে তাৎক্ষণিক আইনগত ব্যবস্থা নেওয়ার নির্দেশ দিয়েছে।"
-            : "Unified Editorial Summary (Consolidating the Front Page Lead with Page P.04 continuation details): Our editorial team has synthesized the raw front-page text with the continuation segment found on page P.04. Central administrators have announced strict regulatory measures over reserves to stabilize pricing models.",
-          originPage: `P.${String(firstPage).padStart(2, "0")}`,
-          hasJump: true,
-          jumpPageNumber: 4,
-          jumpMerged: "P.04",
-          jumpDetails: isSamakal
-            ? "জাম্প নিউজ ট্র্যাকিং: পৃষ্ঠা ৪ কলাম ৫-এর পোশাক শ্রমিকদের আন্দোলনের গতিবিধি ও দাবিদাওয়া একত্রিত করা হয়েছে।"
-            : isProthomAlo
-            ? "জাম্প নিউজ ট্র্যাকিং: পৃষ্ঠা ৪ কলাম ২-এ বিস্তারিত দেখুন। মনিটরিং সেল ও মোবাইল কোর্টের সাজার বিবরণ একত্রিত করা হয়েছে।"
-            : "Jump news trace consolidated cleanly. Merged lead report from Page 1 with secondary columns on Page 4."
-        }
-      ],
-      pageThree: middlePages.length > 0 ? [
-        {
-          title: isSamakal
-            ? "ঢাকা ওয়াসা পানির দাম বাড়ানোর প্রস্তাব নাকচ করলো মন্ত্রণালয়"
-            : isProthomAlo
-            ? "রাজধানীর বায়ুমান নিয়ন্ত্রণে বিশেষ টাস্কফোর্স গঠন"
-            : "Dhaka air standard deteriorates under dust control failures",
-          subheadline: isSamakal
-            ? "চাহিদা অনুযায়ী সেবা নিশ্চিত না করে অতিরিক্ত বোঝা চাপানো যাবে না"
-            : isProthomAlo
-            ? "নির্মাণাধীন প্রকল্পগুলোতে প্রতিদিন পানি ছিটানো বাধ্যতামূলক"
-            : "Environment enforcement units planning snap compliance inspections on capital construction sites",
-          byline: isDailyStar ? "Metro Desk" : "ঢাকা",
-          author: isSamakal ? "তানভীর আহমেদ" : isProthomAlo ? "নিজস্ব প্রতিবেদক" : "Mohammad Al-Masum Molla",
-          category: isDailyStar ? "National" : "নগর উন্নয়ন",
-          summary: isSamakal
-            ? "রাজধানীর গ্রাহকদের সুষ্ঠু পানি সরবরাহ নিশ্চিত না করে পানির দাম বাড়ানোর প্রস্তাব নাকচ করেছে স্থানীয় সরকার মন্ত্রণালয়। ওয়াসার পক্ষ থেকে দাবি করা হয়েছিল পরিচালন ব্যয় বেড়ে যাওয়ায় এ মূল্যবৃদ্ধি জরুরি, কিন্তু মন্ত্রণালয় জানায় সেবার মান উন্নত না করে অতিরিক্ত করের বোঝা চাপানো যাবে না।"
-            : isProthomAlo
-            ? "রাজধানীর ধুলোবালি ও দূষণ নিয়ন্ত্রণে একটি বিশেষ টাস্কফোর্স গঠন করেছে পরিবেশ অধিদপ্তর। মেগাপ্রজেক্ট ও অন্যান্য নির্মাণাধীন সাইটগুলোতে দিনে অন্তত দুবার পানি ছিটানো বাধ্যতামূলক করা হয়েছে। লঙ্ঘনকারীদের বিরুদ্ধে ভারী জরিমানার বিধান রাখা হয়েছে।"
-            : "Air quality indicators across major metropolitan zones have deteriorated significantly ahead of the upcoming dry season. The local environmental agency has traced dust-suppression failures in active construction sites.",
-          originPage: `P.${String(middlePages[0]).padStart(2, "0")}`,
-          hasJump: false,
-        }
-      ] : [],
-      backPage: [
-        {
-          title: isSamakal
-            ? "খেলাধুলা: বড় জয়ে সেমিফাইনালের পথে বাংলাদেশ অনূর্ধ্ব-১৯ দল"
-            : isProthomAlo
-            ? "বাংলাদেশ ক্রিকেট দলের নিবিড় অনুশীলন ক্যাম্প শুরু"
-            : "National Cricket Academy announces intensive preparation schedule ahead of international fixtures",
-          subheadline: isSamakal
-            ? "ব্যাট-বলে অলরাউন্ড পারফরম্যান্সে দুর্দান্ত খেলে ভারতকে উড়িয়ে দিল যুবারা"
-            : isProthomAlo
-            ? "পেসারদের জন্য বিশেষ ফিটনেস মডিউল তৈরি"
-            : "Top fast-bowlers placed under special endurance modules with state therapists",
-          byline: isDailyStar ? "Sports Correspondent" : "ক্রীড়া প্রতিবেদক",
-          author: isSamakal ? "সৈয়দ ফয়েজ আহমেদ" : isProthomAlo ? "মাসুদ আলম" : "Mazhar Uddin",
-          category: "Sports",
-          summary: isSamakal
-            ? "যুব এশিয়া কাপ ক্রিকেটে ভারতকে বড় ব্যবধানে পরাজিত করে সেমিফাইনালের পথে এক ধাপ এগিয়ে গেল টিম বাংলাদেশ। টসে জিতে প্রথমে ব্যাটিং করে বাংলাদেশ নির্ধারিত ৫০ ওভারে ২৮৫ রান সংগ্রহ করে। পরে বোলিংয়ে দুর্দান্ত পারফর্ম করে ভারতের যুবাদের মাত্র ১৮০ রানে অলআউট করে দেয়।"
-            : isProthomAlo
-            ? "আসন্ন আন্তর্জাতিক সিরিজগুলোর প্রস্তুতি হিসেবে শেরেবাংলা স্টেডিয়ামে অনুশীলন ক্যাম্প শুরু করেছে জাতীয় দল। বিশেষ করে ফাস্ট বোলারদের জন্য ইনজুরি প্রতিরোধে ফিজিওর অধীনে বিশেষ ট্র্যাকিং সেশন তৈরি করা হয়েছে।"
-            : "The National Cricket Academy has officially launched an intensive high-performance preparation camp in Dhaka to prepare the national squad for upcoming international tours.",
-          originPage: `P.${String(lastPage).padStart(2, "0")}`,
-          hasJump: false,
-        }
-      ]
-    };
-    fs.writeFileSync(summaryPath, JSON.stringify(simulatedData, null, 2));
-    return;
+    throw new Error("GEMINI_API_KEY is missing");
   }
 
   try {
@@ -623,10 +535,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const usesStagedStorage = stagedPages.length > 0;
-    const editionDir = usesStagedStorage
-      ? path.join(os.tmpdir(), "editorpulse", pubId, dateFormatted)
-      : path.join(UPLOADS_DIR, pubId, dateFormatted);
+    const editionDir = path.join(UPLOADS_DIR, pubId, dateFormatted);
     fs.mkdirSync(editionDir, { recursive: true });
 
     const savedPages: string[] = [...stagedPages];
@@ -638,22 +547,25 @@ export async function POST(req: NextRequest) {
       const arrayBuffer = await file.arrayBuffer();
       const buffer = Buffer.from(arrayBuffer);
       const objectPath = `${pubId}/${dateFormatted}/${fileName}`;
-      const pageUrl = await uploadPageToSupabaseStorage({
-        objectPath,
-        buffer,
-        contentType: file.type || "application/octet-stream",
-      });
+      const pageUrl = hasSupabaseBackendConfig()
+        ? await uploadPageToSupabaseStorage({
+            objectPath,
+            buffer,
+            contentType: file.type || "application/octet-stream",
+          })
+        : savePageToLocalUploads({
+            objectPath,
+            buffer,
+          });
       savedPages.push(pageUrl);
     }
 
-    if (!usesStagedStorage && files.length > 0 && !process.env.VERCEL) {
-      updateManifest(pubId, publicationName, {
-        date: dateFormatted,
-        edition,
-        pageCount: files.length,
-        pages: savedPages,
-      });
-    }
+    updateManifest(pubId, publicationName, {
+      date: dateFormatted,
+      edition,
+      pageCount: savedPages.length,
+      pages: savedPages,
+    });
 
     const ocrPages = (formData.get("ocrPages") as string) || "1, 2, 17";
 

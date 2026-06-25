@@ -121,9 +121,6 @@ export default function AdminPage() {
   const [publications, setPublications] = useState<PublicationInfo[]>([]);
   const [isLoadingEditions, setIsLoadingEditions] = useState(true);
 
-  // Seed state
-  const [isSeeding, setIsSeeding] = useState(false);
-  const [isSeedingSamakal, setIsSeedingSamakal] = useState(false);
   const [ocrPagesInput, setOcrPagesInput] = useState("1, 2, 17");
   const [deletingEditionKey, setDeletingEditionKey] = useState<string | null>(null);
 
@@ -342,66 +339,6 @@ export default function AdminPage() {
       });
     } finally {
       setIsUploading(false);
-    }
-  };
-
-  const handleSeedProthomAlo = async () => {
-    setIsSeeding(true);
-    try {
-      const res = await fetch("/api/seed", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ pubId: "prothom-alo", ocrPages: "1, 2, 17" })
-      });
-      const data = await readJsonResponse(res);
-      if (res.ok && data.success) {
-        setUploadResult({
-          success: true,
-          message: data.alreadyExists
-            ? "Prothom Alo sample data already exists!"
-            : `Seeded ${data.pageCount} pages for Prothom Alo successfully!`,
-        });
-        fetchEditions();
-      } else {
-        throw new Error(data.error);
-      }
-    } catch (error: any) {
-      setUploadResult({
-        success: false,
-        message: error.message || "Seed failed",
-      });
-    } finally {
-      setIsSeeding(false);
-    }
-  };
-
-  const handleSeedSamakal = async () => {
-    setIsSeedingSamakal(true);
-    try {
-      const res = await fetch("/api/seed", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ pubId: "samakal", ocrPages: "1, 2, 3, last" })
-      });
-      const data = await readJsonResponse(res);
-      if (res.ok && data.success) {
-        setUploadResult({
-          success: true,
-          message: data.alreadyExists
-            ? "Samakal sample data already exists!"
-            : `Seeded ${data.pageCount} pages for Samakal successfully!`,
-        });
-        fetchEditions();
-      } else {
-        throw new Error(data.error);
-      }
-    } catch (error: any) {
-      setUploadResult({
-        success: false,
-        message: error.message || "Seed failed",
-      });
-    } finally {
-      setIsSeedingSamakal(false);
     }
   };
 
@@ -779,48 +716,6 @@ export default function AdminPage() {
             </div>
           </div>
 
-          {/* Quick Seed Buttons */}
-          <div className="bg-gradient-to-r from-slate-900 to-slate-900 rounded-2xl border border-slate-800/80 p-5">
-            <div className="flex items-start gap-4">
-              <div className="bg-blue-600/20 p-2.5 rounded-xl border border-blue-500/20 flex-shrink-0">
-                <FolderOpen className="w-5 h-5 text-blue-400" />
-              </div>
-              <div className="flex-1">
-                <h3 className="font-bold text-sm text-slate-200">Seed Sample Newspapers</h3>
-                <p className="text-xs text-slate-400 mt-1 leading-relaxed">
-                  Load pre-configured sample newspaper pages from the project directory. 
-                  This will copy sample images and execute the dynamic OCR analysis pipeline.
-                </p>
-                <div className="flex flex-wrap gap-3 mt-4">
-                  <button
-                    onClick={handleSeedProthomAlo}
-                    disabled={isSeeding || isSeedingSamakal}
-                    className="px-4 py-2.5 bg-amber-600/20 hover:bg-amber-600/30 border border-amber-600/30 text-amber-300 font-bold text-xs rounded-lg transition-all flex items-center gap-2 disabled:opacity-50"
-                  >
-                    {isSeeding ? (
-                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                    ) : (
-                      <FolderOpen className="w-3.5 h-3.5" />
-                    )}
-                    {isSeeding ? "Seeding Prothom Alo..." : "Seed Prothom Alo (17 Pages)"}
-                  </button>
-
-                  <button
-                    onClick={handleSeedSamakal}
-                    disabled={isSeeding || isSeedingSamakal}
-                    className="px-4 py-2.5 bg-emerald-600/20 hover:bg-emerald-600/30 border border-emerald-600/30 text-emerald-300 font-bold text-xs rounded-lg transition-all flex items-center gap-2 disabled:opacity-50"
-                  >
-                    {isSeedingSamakal ? (
-                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                    ) : (
-                      <FolderOpen className="w-3.5 h-3.5" />
-                    )}
-                    {isSeedingSamakal ? "Seeding Samakal..." : "Seed Samakal (1,2,3,last)"}
-                  </button>
-                </div>
-              </div>
-            </div>
-          </div>
         </div>
 
         {/* Existing Editions Panel — Right 2 columns */}
@@ -848,7 +743,7 @@ export default function AdminPage() {
                 <div className="p-8 text-center">
                   <FolderOpen className="w-10 h-10 text-slate-700 mx-auto mb-3" />
                   <p className="text-sm font-bold text-slate-500">No editions uploaded yet</p>
-                  <p className="text-xs text-slate-600 mt-1">Upload page scans or seed sample data</p>
+                  <p className="text-xs text-slate-600 mt-1">Upload page scans to create an edition</p>
                 </div>
               ) : (
                 <div className="divide-y divide-slate-800/40">
