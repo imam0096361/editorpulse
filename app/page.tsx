@@ -26,14 +26,10 @@ import {
   Search,
   Filter,
   Star,
-  Users,
   ClipboardList,
   AlertTriangle,
   GitCompare,
-  Target,
-  MessageSquare,
   CheckCircle2,
-  Clock3,
 } from "lucide-react";
 import { EditorPulseLogo } from "@/components/editor-pulse-logo";
 import { cn } from "@/lib/utils";
@@ -83,11 +79,8 @@ interface PublicationGroup {
 }
 
 type ViewMode = "desk" | "pages" | "summary";
-type DeskTab = "audit" | "top" | "clusters" | "gaps" | "assignments" | "review" | "publications";
-type StoryStatus = "New" | "Reviewed" | "Assigned" | "In Progress" | "Published" | "Archived";
-type StoryPriority = "Breaking" | "High" | "Normal" | "Low";
+type DeskTab = "missed" | "matched" | "human_check" | "single" | "all";
 type StorySection = "frontPage" | "pageThree" | "backPage";
-type CoverageStatus = "matched" | "possible" | "not_found" | "baseline";
 
 interface NewsDeskStory {
   id: string;
@@ -109,66 +102,35 @@ interface NewsDeskStory {
 interface StoryMatch {
   story: NewsDeskStory;
   score: number;
+  evidence: string[];
+  confirmed: boolean;
 }
 
-interface StoryWorkflowState {
-  status: StoryStatus;
-  priority: StoryPriority;
-  assignedTo: string;
-  note: string;
-  updatedAt: string;
-}
-
-interface StoryCluster {
+interface DailyStarCluster {
   anchor: NewsDeskStory;
-  matches: NewsDeskStory[];
+  matches: StoryMatch[];
 }
 
-interface CoverageAuditEntry {
-  deskStory: NewsDeskStory;
-  status: CoverageStatus;
-  confidence: number;
+interface MissedStoryCluster {
+  id: string;
+  leadStory: NewsDeskStory;
+  supportingStories: StoryMatch[];
+  weakDailyStarCandidate?: StoryMatch;
   importanceScore: number;
-  importanceLabel: "Critical" | "High" | "Medium" | "Low";
-  bestDailyStarMatch?: NewsDeskStory;
-  sharedEvidence: string[];
-  conflicts: string[];
-  editorNote: string;
-  actionLabel: string;
+  importanceReasons: string[];
+  publicationCount: number;
+  storyCount: number;
 }
 
 const MAIN_PUBLICATION_ID = "daily-star";
-const WORKFLOW_STORAGE_KEY = "editorpulse-newsdesk-workflow-v1";
 
 const deskTabs: { id: DeskTab; label: string; icon: React.ElementType }[] = [
-  { id: "audit", label: "Coverage Audit", icon: AlertTriangle },
-  { id: "top", label: "Top Stories", icon: Star },
-  { id: "clusters", label: "Clusters", icon: GitCompare },
-  { id: "gaps", label: "Daily Star Gaps", icon: AlertTriangle },
-  { id: "assignments", label: "Assignments", icon: Users },
-  { id: "review", label: "Review Queue", icon: AlertTriangle },
-  { id: "publications", label: "Publications", icon: Newspaper },
+  { id: "missed", label: "Daily Star Missed", icon: AlertTriangle },
+  { id: "matched", label: "Daily Star Matched", icon: GitCompare },
+  { id: "human_check", label: "Needs Human Check", icon: Search },
+  { id: "single", label: "Single Publication", icon: Newspaper },
+  { id: "all", label: "All Publications", icon: Layers },
 ];
-
-const statusOptions: StoryStatus[] = ["New", "Reviewed", "Assigned", "In Progress", "Published", "Archived"];
-const priorityOptions: StoryPriority[] = ["Breaking", "High", "Normal", "Low"];
-const assigneeOptions = ["Unassigned", "News Desk", "Politics Desk", "Economy Desk", "Metro Desk", "Sports Desk", "Digital Desk"];
-
-const priorityRank: Record<StoryPriority, number> = {
-  Breaking: 0,
-  High: 1,
-  Normal: 2,
-  Low: 3,
-};
-
-const statusRank: Record<StoryStatus, number> = {
-  New: 0,
-  Assigned: 1,
-  "In Progress": 2,
-  Reviewed: 3,
-  Published: 4,
-  Archived: 5,
-};
 
 const sectionLabels: Record<StorySection, string> = {
   frontPage: "Front",
@@ -223,67 +185,92 @@ const tokenizeStory = (story: NewsStory) => {
   );
 };
 
-const getSimilarityScore = (story: NewsStory, baseline: NewsStory) => {
-  const left = tokenizeStory(story);
-  const right = tokenizeStory(baseline);
-
-  let overlap = 0;
-  left.forEach((token) => {
-    if (right.has(token)) overlap += 1;
-  });
-
-  const tokenScore = left.size === 0 || right.size === 0
-    ? 0
-    : (overlap / Math.max(Math.min(left.size, right.size), 1)) * 100;
-
-  const leftConcepts = getStoryConcepts(story);
-  const rightConcepts = getStoryConcepts(baseline);
-  let conceptOverlap = 0;
-  leftConcepts.forEach((concept) => {
-    if (rightConcepts.has(concept)) conceptOverlap += 1;
-  });
-
-  const conceptScore = leftConcepts.size === 0 || rightConcepts.size === 0
-    ? 0
-    : (conceptOverlap / Math.max(Math.min(leftConcepts.size, rightConcepts.size), 1)) * 100;
-  const categoryBoost = normalizeText(story.category) === normalizeText(baseline.category) ? 10 : 0;
-  const pageBoost = story.originPage === baseline.originPage ? 4 : 0;
-
-  return Math.min(100, Math.round((tokenScore * 0.55) + (conceptScore * 0.4) + categoryBoost + pageBoost));
-};
-
 const slugify = (value: string) =>
   normalizeText(value)
     .replace(/\s+/g, "-")
     .replace(/^-+|-+$/g, "")
     .slice(0, 72) || "story";
 
-const getDefaultPriority = (story: NewsStory): StoryPriority => {
-  const text = normalizeText(`${story.title} ${story.category} ${story.originPage}`);
-  if (text.includes("breaking") || text.includes("lead") || text.includes("গুরুত্বপূর্ণ")) return "Breaking";
-  if (story.originPage.includes("01") || story.jumpMerged) return "High";
-  if (text.includes("sports") || text.includes("খেলাধুলা") || text.includes("ক্রীড়া")) return "Normal";
-  return "Normal";
+const broadConceptTerms = new Set(
+  Object.values(conceptLexicon)
+    .flat()
+    .map((term) => normalizeText(term))
+    .filter(Boolean)
+);
+
+const publicInterestPattern = /(government|minister|court|police|economy|inflation|bank|election|policy|law|budget|crime|worker|wage|flood|cyclone|disaster|parliament|cabinet|protest|corruption|সরকার|মন্ত্রী|আদালত|পুলিশ|অর্থনীতি|মূল্যস্ফীতি|ব্যাংক|নির্বাচন|নীতি|আইন|শ্রমিক|মজুরি|বন্যা|ঘূর্ণিঝড়|দুর্যোগ|সংসদ|দুর্নীতি)/;
+
+const intersection = (left: Set<string>, right: Set<string>) =>
+  Array.from(left).filter((item) => right.has(item));
+
+const extractStorySignals = (story: NewsStory) => {
+  const titleTokens = tokenizeStory({ ...story, summary: "", subheadline: "", category: "" });
+  const allTokens = tokenizeStory(story);
+  const factualTerms = new Set(
+    Array.from(allTokens).filter((token) => (
+      /\d/.test(token) ||
+      token.length >= 5 ||
+      /[\u0980-\u09FF]/.test(token)
+    ))
+  );
+  const distinctiveTerms = new Set(
+    Array.from(factualTerms).filter((token) => !broadConceptTerms.has(token) || /\d/.test(token))
+  );
+  const publicTerms = new Set(
+    Array.from(allTokens).filter((token) => publicInterestPattern.test(token))
+  );
+
+  return {
+    titleTokens,
+    factualTerms,
+    distinctiveTerms,
+    publicTerms,
+    concepts: getStoryConcepts(story),
+  };
 };
 
-const getDefaultWorkflow = (story: NewsStory): StoryWorkflowState => ({
-  status: "New",
-  priority: getDefaultPriority(story),
-  assignedTo: "Unassigned",
-  note: "",
-  updatedAt: new Date().toISOString(),
-});
+const scoreStrictStoryMatch = (story: NewsStory, candidate: NewsStory): {
+  score: number;
+  evidence: string[];
+  confirmed: boolean;
+} => {
+  const left = extractStorySignals(story);
+  const right = extractStorySignals(candidate);
+  const sharedTitleTerms = intersection(left.titleTokens, right.titleTokens);
+  const sharedDistinctiveTerms = intersection(left.distinctiveTerms, right.distinctiveTerms);
+  const sharedPublicTerms = intersection(left.publicTerms, right.publicTerms);
+  const sharedConcepts = intersection(left.concepts, right.concepts);
+  const sharedNumbers = sharedDistinctiveTerms.filter((term) => /\d/.test(term));
+  const headlineDenominator = Math.max(Math.min(left.titleTokens.size, right.titleTokens.size), 1);
+  const headlineOverlap = sharedTitleTerms.length / headlineDenominator;
+  const factualStrength = sharedDistinctiveTerms.length + sharedNumbers.length + Math.min(sharedPublicTerms.length, 2);
+  const broadOnly = sharedDistinctiveTerms.length === 0 && sharedTitleTerms.length < 2;
 
-const getSharedTokens = (story: NewsStory, baseline: NewsStory, limit = 8) => {
-  const right = tokenizeStory(baseline);
-  return Array.from(tokenizeStory(story))
-    .filter((token) => right.has(token))
-    .slice(0, limit);
-};
+  const score = Math.min(100, Math.round(
+    headlineOverlap * 54 +
+    Math.min(sharedDistinctiveTerms.length, 6) * 7 +
+    Math.min(sharedNumbers.length, 3) * 8 +
+    Math.min(sharedPublicTerms.length, 2) * 4
+  ));
 
-const getSharedConcepts = (story: NewsStory, baseline: NewsStory) => {
-  const right = getStoryConcepts(baseline);
-  return Array.from(getStoryConcepts(story)).filter((concept) => right.has(concept));
+  const confirmed = !broadOnly && (
+    (headlineOverlap >= 0.32 && factualStrength >= 3) ||
+    (sharedTitleTerms.length >= 3 && factualStrength >= 2) ||
+    (sharedNumbers.length > 0 && headlineOverlap >= 0.24 && factualStrength >= 2)
+  );
+
+  const evidence = [
+    ...sharedTitleTerms.slice(0, 4).map((term) => `headline term: ${term}`),
+    ...sharedDistinctiveTerms.slice(0, 6).map((term) => `factual term: ${term}`),
+    ...sharedNumbers.slice(0, 2).map((term) => `number/date: ${term}`),
+    ...sharedConcepts.slice(0, 2).map((term) => `topic context: ${term}`),
+  ];
+
+  return {
+    score,
+    evidence: Array.from(new Set(evidence)),
+    confirmed,
+  };
 };
 
 const getImportanceScore = (deskStory: NewsDeskStory) => {
@@ -300,141 +287,111 @@ const getImportanceScore = (deskStory: NewsDeskStory) => {
   return Math.max(0, Math.min(100, score));
 };
 
-const getImportanceLabel = (score: number): CoverageAuditEntry["importanceLabel"] => {
-  if (score >= 78) return "Critical";
-  if (score >= 58) return "High";
-  if (score >= 36) return "Medium";
-  return "Low";
+const getImportanceReasons = (clusterStories: NewsDeskStory[]) => {
+  const leadStory = clusterStories[0];
+  const reasons: string[] = [];
+  const publicationCount = new Set(clusterStories.map((story) => story.publicationId)).size;
+  const text = normalizeText(clusterStories.map((story) => `${story.story.title} ${story.story.category} ${story.story.summary}`).join(" "));
+
+  if (publicationCount >= 2) reasons.push(`carried by ${publicationCount} non-Daily-Star publications`);
+  if (clusterStories.some((story) => story.section === "frontPage" || story.story.originPage.includes("01"))) reasons.push("front-page placement");
+  if (clusterStories.some((story) => story.story.jumpMerged)) reasons.push("jump story with continuation");
+  if (publicInterestPattern.test(text)) reasons.push("public-interest subject");
+  if (leadStory && getImportanceScore(leadStory) >= 58) reasons.push("high editorial importance score");
+
+  return reasons.length > 0 ? reasons : ["single-source item; verify before escalating"];
 };
 
-const getAuditStatusLabel = (status: CoverageStatus) => {
-  if (status === "matched") return "Published by Daily Star";
-  if (status === "possible") return "Needs manual review";
-  if (status === "baseline") return "Daily Star baseline";
-  return "Not found in Daily Star";
-};
-
-const buildCoverageAuditEntry = (
-  deskStory: NewsDeskStory,
+const buildDailyStarClusters = (
   baselineStories: NewsDeskStory[],
-  peerMatches: StoryMatch[] = []
-): CoverageAuditEntry => {
-  if (deskStory.isMainPublication) {
-    return {
-      deskStory,
-      status: "baseline",
-      confidence: 100,
-      importanceScore: getImportanceScore(deskStory),
-      importanceLabel: getImportanceLabel(getImportanceScore(deskStory)),
-      sharedEvidence: ["This story is from The Daily Star baseline edition."],
-      conflicts: [],
-      editorNote: "Use this as the reference item when checking other publications.",
-      actionLabel: "Baseline",
-    };
-  }
+  nonBaselineStories: NewsDeskStory[]
+): DailyStarCluster[] => baselineStories
+  .map((anchor) => ({
+    anchor,
+    matches: nonBaselineStories
+      .map((story) => {
+        const result = scoreStrictStoryMatch(story.story, anchor.story);
+        return {
+          story,
+          score: result.confirmed ? 100 : result.score,
+          evidence: result.evidence,
+          confirmed: result.confirmed,
+        };
+      })
+      .filter((match) => match.confirmed)
+      .sort((a, b) => b.score - a.score),
+  }))
+  .filter((cluster) => cluster.matches.length > 0);
 
-  const candidates = baselineStories
-    .map((baselineStory) => {
-      const score = getSimilarityScore(deskStory.story, baselineStory.story);
-      const sharedTokens = getSharedTokens(deskStory.story, baselineStory.story);
-      const sharedConcepts = getSharedConcepts(deskStory.story, baselineStory.story);
-      const categoryMatches = normalizeText(deskStory.story.category) === normalizeText(baselineStory.story.category);
-      const evidenceCount = sharedTokens.length + sharedConcepts.length + (categoryMatches ? 1 : 0);
+const buildMissedStoryClusters = (
+  nonBaselineStories: NewsDeskStory[],
+  baselineStories: NewsDeskStory[]
+): MissedStoryCluster[] => {
+  const confirmedDailyStarStoryIds = new Set(
+    nonBaselineStories
+      .filter((story) => baselineStories.some((baselineStory) => scoreStrictStoryMatch(story.story, baselineStory.story).confirmed))
+      .map((story) => story.id)
+  );
+  const remainingStories = nonBaselineStories.filter((story) => !confirmedDailyStarStoryIds.has(story.id));
+  const visited = new Set<string>();
+  const clusters: MissedStoryCluster[] = [];
 
-      return {
-        baselineStory,
-        score,
-        sharedTokens,
-        sharedConcepts,
-        categoryMatches,
-        evidenceCount,
-      };
-    })
-    .sort((a, b) => b.score - a.score || b.evidenceCount - a.evidenceCount);
+  for (const story of remainingStories) {
+    if (visited.has(story.id)) continue;
 
-  const best = candidates[0];
-  const importanceScore = getImportanceScore(deskStory);
-  const importanceLabel = getImportanceLabel(importanceScore);
-  const supportingPeerCount = peerMatches.filter((match) => match.score >= 24).length;
+    const supportingStories = remainingStories
+      .filter((candidate) => candidate.id !== story.id && candidate.publicationId !== story.publicationId)
+      .map((candidate) => {
+        const result = scoreStrictStoryMatch(story.story, candidate.story);
+        return {
+          story: candidate,
+          score: result.confirmed ? 100 : result.score,
+          evidence: result.evidence,
+          confirmed: result.confirmed,
+        };
+      })
+      .filter((match) => match.confirmed)
+      .sort((a, b) => b.score - a.score);
 
-  if (!best) {
-    return {
-      deskStory,
-      status: "not_found",
-      confidence: 0,
+    const clusterStories = [story, ...supportingStories.map((match) => match.story)];
+    clusterStories.forEach((clusterStory) => visited.add(clusterStory.id));
+    const leadStory = clusterStories
+      .slice()
+      .sort((a, b) => getImportanceScore(b) - getImportanceScore(a))[0];
+    const publicationCount = new Set(clusterStories.map((clusterStory) => clusterStory.publicationId)).size;
+    const weakDailyStarCandidate = baselineStories
+      .map((baselineStory) => {
+        const result = scoreStrictStoryMatch(leadStory.story, baselineStory.story);
+        return {
+          story: baselineStory,
+          score: result.score,
+          evidence: result.evidence,
+          confirmed: result.confirmed,
+        };
+      })
+      .filter((match) => !match.confirmed && match.score >= 24)
+      .sort((a, b) => b.score - a.score)[0];
+    const reasons = getImportanceReasons(clusterStories);
+    const importanceScore = Math.min(100, getImportanceScore(leadStory) + (publicationCount >= 2 ? 22 : 0) + (clusterStories.length > 2 ? 8 : 0));
+
+    clusters.push({
+      id: clusterStories.map((clusterStory) => clusterStory.id).sort().join("|"),
+      leadStory,
+      supportingStories,
+      weakDailyStarCandidate,
       importanceScore,
-      importanceLabel,
-      sharedEvidence: peerMatches.length > 0
-        ? [`Also appears related in ${supportingPeerCount || peerMatches.length} other publication item(s).`]
-        : [],
-      conflicts: ["No The Daily Star edition is loaded for this date."],
-      editorNote: "Daily Star baseline is missing, so this cannot be authenticated as covered.",
-      actionLabel: importanceScore >= 58 ? "Check urgently" : "Check manually",
-    };
+      importanceReasons: reasons,
+      publicationCount,
+      storyCount: clusterStories.length,
+    });
   }
 
-  const sharedEvidence = [
-    ...best.sharedConcepts.map((concept) => `Shared topic: ${concept}`),
-    ...best.sharedTokens.slice(0, 5).map((token) => `Shared term: ${token}`),
-  ];
-
-  if (best.categoryMatches) {
-    sharedEvidence.unshift("Category matches the Daily Star candidate.");
-  }
-
-  if (supportingPeerCount > 0) {
-    sharedEvidence.push(`Related item also appears in ${supportingPeerCount} non-Daily-Star publication(s).`);
-  }
-
-  const conflicts: string[] = [];
-  if (best.sharedConcepts.length === 0) conflicts.push("No strong shared news topic with the Daily Star candidate.");
-  if (best.sharedTokens.length < 3) conflicts.push("Too few shared factual terms for a confident match.");
-  if (!best.categoryMatches && best.score < 56) conflicts.push("Category differs or is too broad.");
-
-  const hasStrongEvidence = best.score >= 50 && best.evidenceCount >= 4 && best.sharedConcepts.length > 0;
-  const hasPossibleEvidence = best.score >= 24 && best.evidenceCount >= 2;
-  const status: CoverageStatus = hasStrongEvidence ? "matched" : hasPossibleEvidence ? "possible" : "not_found";
-  const confidence = status === "matched"
-    ? Math.min(96, best.score + best.evidenceCount * 3)
-    : status === "possible"
-      ? Math.min(72, best.score + best.evidenceCount * 2)
-      : Math.min(42, best.score);
-
-  return {
-    deskStory,
-    status,
-    confidence,
-    importanceScore,
-    importanceLabel,
-    bestDailyStarMatch: best.baselineStory,
-    sharedEvidence: sharedEvidence.length > 0 ? sharedEvidence : ["No reliable shared evidence found."],
-    conflicts,
-    editorNote: status === "matched"
-      ? "Daily Star appears to have covered this story. Verify the matched headline before closing it."
-      : status === "possible"
-        ? "There is partial overlap, but not enough evidence to call it covered. Keep this in manual review."
-        : "No authentic Daily Star match found from the uploaded OCR summaries. Treat as a possible missed story.",
-    actionLabel: status === "matched"
-      ? "Verify and close"
-      : status === "possible"
-        ? "Manual review"
-        : importanceScore >= 58
-          ? "Check urgently"
-          : "Consider for follow-up",
-  };
+  return clusters.sort((a, b) => (
+    Number(b.publicationCount >= 2) - Number(a.publicationCount >= 2) ||
+    b.importanceScore - a.importanceScore ||
+    b.storyCount - a.storyCount
+  ));
 };
-
-const isNeedsReview = (deskStory: NewsDeskStory, workflow: StoryWorkflowState) =>
-  workflow.status === "New" ||
-  Boolean(deskStory.story.jumpMerged) ||
-  (!deskStory.isMainPublication && deskStory.comparisonScore < 18);
-
-const isImportantDeskStory = (deskStory: NewsDeskStory, workflow: StoryWorkflowState) =>
-  workflow.priority === "Breaking" ||
-  workflow.priority === "High" ||
-  deskStory.section === "frontPage" ||
-  normalizeText(deskStory.story.category).includes("lead") ||
-  deskStory.story.category.includes("গুরুত্বপূর্ণ");
 
 const getPublicationStories = (publication: Publication): NewsDeskStory[] => {
   const sections: { key: StorySection; stories: NewsStory[] }[] = [
@@ -471,25 +428,13 @@ export default function Home() {
 
   // View mode: "desk" for cross-publication newsroom, "pages" for page viewer, "summary" for story summary
   const [viewMode, setViewMode] = useState<ViewMode>("desk");
-  const [deskTab, setDeskTab] = useState<DeskTab>("audit");
+  const [deskTab, setDeskTab] = useState<DeskTab>("missed");
   const [deskSearch, setDeskSearch] = useState("");
   const [deskDate, setDeskDate] = useState<string | null>(null);
   const [deskPublicationFilter, setDeskPublicationFilter] = useState("all");
-  const [deskPriorityFilter, setDeskPriorityFilter] = useState<StoryPriority | "all">("all");
-  const [deskStatusFilter, setDeskStatusFilter] = useState<StoryStatus | "all">("all");
   const [deskEditionDetails, setDeskEditionDetails] = useState<Publication[]>([]);
   const [isLoadingDeskEditions, setIsLoadingDeskEditions] = useState(false);
   const [deskLoadError, setDeskLoadError] = useState<string | null>(null);
-  const [workflowByStoryId, setWorkflowByStoryId] = useState<Record<string, StoryWorkflowState>>({});
-
-  useEffect(() => {
-    try {
-      const storedWorkflow = window.localStorage.getItem(WORKFLOW_STORAGE_KEY);
-      setWorkflowByStoryId(storedWorkflow ? JSON.parse(storedWorkflow) : {});
-    } catch {
-      setWorkflowByStoryId({});
-    }
-  }, []);
 
   // Page Viewer state
   const [currentPage, setCurrentPage] = useState(0);
@@ -879,56 +824,39 @@ export default function Home() {
         };
       }
 
-      const bestMatch = baselineStories.reduce<NewsDeskStory | null>((currentBest, baselineStory) => {
-        const score = getSimilarityScore(deskStory.story, baselineStory.story);
-        if (!currentBest || score > currentBest.comparisonScore) {
-          return { ...baselineStory, comparisonScore: score };
+      const bestMatch = baselineStories.reduce<StoryMatch | null>((currentBest, baselineStory) => {
+        const result = scoreStrictStoryMatch(deskStory.story, baselineStory.story);
+        const score = result.confirmed ? 100 : result.score;
+        if (!currentBest || score > currentBest.score) {
+          return {
+            story: baselineStory,
+            score,
+            evidence: result.evidence,
+            confirmed: result.confirmed,
+          };
         }
         return currentBest;
       }, null);
 
-      const comparisonScore = bestMatch?.comparisonScore || 0;
-      const comparisonLabel = comparisonScore >= 34
-        ? "Strong Daily Star match"
-        : comparisonScore >= 18
-          ? "Related angle"
+      const comparisonScore = bestMatch?.score || 0;
+      const comparisonLabel = bestMatch?.confirmed
+        ? "Confirmed Daily Star match"
+        : bestMatch && bestMatch.score >= 24
+          ? "Weak candidate, not enough evidence"
           : "Not in Daily Star";
 
       return {
         ...deskStory,
         comparisonScore,
         comparisonLabel,
-        mainMatchId: bestMatch?.id,
-        mainMatchTitle: bestMatch?.story.title,
+        mainMatchId: bestMatch?.confirmed ? bestMatch.story.id : undefined,
+        mainMatchTitle: bestMatch?.confirmed ? bestMatch.story.story.title : undefined,
       };
     });
-
-  const getWorkflow = (deskStory: NewsDeskStory) =>
-    workflowByStoryId[deskStory.id] || getDefaultWorkflow(deskStory.story);
-
-  const persistWorkflow = (nextWorkflow: Record<string, StoryWorkflowState>) => {
-    setWorkflowByStoryId(nextWorkflow);
-    if (typeof window !== "undefined") {
-      window.localStorage.setItem(WORKFLOW_STORAGE_KEY, JSON.stringify(nextWorkflow));
-    }
-  };
-
-  const updateWorkflow = (deskStory: NewsDeskStory, patch: Partial<StoryWorkflowState>) => {
-    const currentWorkflow = getWorkflow(deskStory);
-    persistWorkflow({
-      ...workflowByStoryId,
-      [deskStory.id]: {
-        ...currentWorkflow,
-        ...patch,
-        updatedAt: new Date().toISOString(),
-      },
-    });
-  };
 
   const deskSearchTerm = normalizeText(deskSearch);
   const filteredDeskStories = deskStories
     .filter((deskStory) => {
-      const workflow = getWorkflow(deskStory);
       const searchableText = normalizeText([
         deskStory.publicationName,
         deskStory.story.title,
@@ -941,18 +869,13 @@ export default function Home() {
 
       return (
         (!deskSearchTerm || searchableText.includes(deskSearchTerm)) &&
-        (deskPublicationFilter === "all" || deskStory.publicationId === deskPublicationFilter) &&
-        (deskPriorityFilter === "all" || workflow.priority === deskPriorityFilter) &&
-        (deskStatusFilter === "all" || workflow.status === deskStatusFilter)
+        (deskPublicationFilter === "all" || deskStory.publicationId === deskPublicationFilter)
       );
     })
     .sort((a, b) => {
-      const workflowA = getWorkflow(a);
-      const workflowB = getWorkflow(b);
       return (
-        priorityRank[workflowA.priority] - priorityRank[workflowB.priority] ||
-        statusRank[workflowA.status] - statusRank[workflowB.status] ||
         Number(b.isMainPublication) - Number(a.isMainPublication) ||
+        getImportanceScore(b) - getImportanceScore(a) ||
         b.comparisonScore - a.comparisonScore
       );
     });
@@ -966,90 +889,30 @@ export default function Home() {
       stories: filteredDeskStories.filter((deskStory) => deskStory.publicationId === publication.id),
     }));
 
-  const storyClusters: StoryCluster[] = baselineStories.map((anchor) => ({
-    anchor,
-    matches: filteredDeskStories
-      .filter((deskStory) => deskStory.mainMatchId === anchor.id && deskStory.comparisonScore >= 18)
-      .sort((a, b) => b.comparisonScore - a.comparisonScore),
-  }));
-
-  const uniqueNonBaselineStories = filteredDeskStories.filter((deskStory) => (
-    !deskStory.isMainPublication && (!deskStory.mainMatchId || deskStory.comparisonScore < 18)
-  ));
-
-  const peerMatchesByStoryId = new Map<string, StoryMatch[]>(
-    deskStories.map((deskStory) => [
-      deskStory.id,
-      deskStories
-        .filter((candidate) => (
-          candidate.id !== deskStory.id &&
-          candidate.publicationId !== deskStory.publicationId
-        ))
-        .map((candidate) => ({
-          story: candidate,
-          score: getSimilarityScore(deskStory.story, candidate.story),
-        }))
-        .filter((match) => match.score >= 18)
-        .sort((a, b) => b.score - a.score),
-    ])
-  );
-
-  const allCoverageAuditEntries = deskStories
-    .filter((deskStory) => !deskStory.isMainPublication)
-    .map((deskStory) => buildCoverageAuditEntry(deskStory, baselineStories, peerMatchesByStoryId.get(deskStory.id) || []));
-
-  const coverageAuditEntries = filteredDeskStories
-    .filter((deskStory) => !deskStory.isMainPublication)
-    .map((deskStory) => buildCoverageAuditEntry(deskStory, baselineStories, peerMatchesByStoryId.get(deskStory.id) || []))
-    .sort((a, b) => (
-      Number(b.status === "not_found") - Number(a.status === "not_found") ||
-      Number(b.status === "possible") - Number(a.status === "possible") ||
-      b.importanceScore - a.importanceScore ||
-      a.confidence - b.confidence
-    ));
-
-  const coverageAuditByStoryId = new Map(coverageAuditEntries.map((entry) => [entry.deskStory.id, entry]));
-  const missedAuditEntries = coverageAuditEntries.filter((entry) => entry.status === "not_found");
-  const possibleAuditEntries = coverageAuditEntries.filter((entry) => entry.status === "possible");
-  const matchedAuditEntries = coverageAuditEntries.filter((entry) => entry.status === "matched");
-  const urgentMissedAuditEntries = missedAuditEntries.filter((entry) => entry.importanceScore >= 58);
-
-  const coverageGapStories = missedAuditEntries
-    .filter((entry) => entry.importanceScore >= 36)
-    .map((entry) => entry.deskStory);
-
-  const reviewQueueStories = filteredDeskStories.filter((deskStory) => (
-    isNeedsReview(deskStory, getWorkflow(deskStory)) ||
-    coverageAuditByStoryId.get(deskStory.id)?.status === "possible"
-  ));
-
-  const assignedStories = filteredDeskStories.filter((deskStory) => getWorkflow(deskStory).assignedTo !== "Unassigned");
-
-  const totalMatches = allCoverageAuditEntries.filter((entry) => entry.status === "matched").length;
+  const filteredNonBaselineStories = filteredDeskStories.filter((deskStory) => !deskStory.isMainPublication);
+  const dailyStarClusters = buildDailyStarClusters(baselineStories, filteredNonBaselineStories);
+  const missedStoryClusters = buildMissedStoryClusters(filteredNonBaselineStories, baselineStories);
+  const multiPublicationMissedClusters = missedStoryClusters.filter((cluster) => cluster.publicationCount >= 2);
+  const singlePublicationMissedClusters = missedStoryClusters.filter((cluster) => cluster.publicationCount === 1);
+  const humanCheckClusters = missedStoryClusters.filter((cluster) => cluster.weakDailyStarCandidate);
+  const confirmedMatchedStoryIds = new Set(dailyStarClusters.flatMap((cluster) => cluster.matches.map((match) => match.story.id)));
+  const totalMatches = confirmedMatchedStoryIds.size;
   const dailyStarStoryCount = deskStories.filter((deskStory) => deskStory.isMainPublication).length;
-  const needsReviewCount = deskStories.filter((deskStory) => (
-    isNeedsReview(deskStory, getWorkflow(deskStory)) ||
-    allCoverageAuditEntries.some((entry) => entry.deskStory.id === deskStory.id && entry.status === "possible")
-  )).length;
   const hasDailyStarBaseline = dailyStarStoryCount > 0;
 
   const publicationScorecards = deskPublications.map((publication) => {
     const publicationStories = deskStories.filter((deskStory) => deskStory.publicationId === publication.id);
-    const publicationAuditEntries = allCoverageAuditEntries.filter((entry) => entry.deskStory.publicationId === publication.id);
+    const publicationMissedClusters = missedStoryClusters.filter((cluster) => cluster.leadStory.publicationId === publication.id || cluster.supportingStories.some((match) => match.story.publicationId === publication.id));
     const matchedStories = isDailyStarPublication(publication.id, publication.name)
       ? publicationStories.length
-      : publicationAuditEntries.filter((entry) => entry.status === "matched").length;
-    const highPriorityStories = publicationStories.filter((deskStory) => {
-      const priority = getWorkflow(deskStory).priority;
-      return priority === "Breaking" || priority === "High";
-    }).length;
+      : publicationStories.filter((deskStory) => confirmedMatchedStoryIds.has(deskStory.id)).length;
 
     return {
       publication,
       storyCount: publicationStories.length,
       matchedStories,
-      uniqueStories: publicationAuditEntries.filter((entry) => entry.status === "not_found").length,
-      highPriorityStories,
+      uniqueStories: publicationMissedClusters.length,
+      multiPublicationMissed: publicationMissedClusters.filter((cluster) => cluster.publicationCount >= 2).length,
       matchRate: publicationStories.length > 0 ? Math.round((matchedStories / publicationStories.length) * 100) : 0,
     };
   });
@@ -1185,189 +1048,13 @@ export default function Home() {
     }
   };
 
-  const getPriorityClasses = (priority: StoryPriority) => {
-    if (priority === "Breaking") return "bg-red-50 text-red-700 border-red-200";
-    if (priority === "High") return "bg-amber-50 text-amber-700 border-amber-200";
-    if (priority === "Low") return "bg-slate-50 text-slate-600 border-slate-200";
-    return "bg-blue-50 text-blue-700 border-blue-200";
-  };
-
-  const getStatusClasses = (status: StoryStatus) => {
-    if (status === "Published") return "bg-emerald-50 text-emerald-700 border-emerald-200";
-    if (status === "In Progress") return "bg-cyan-50 text-cyan-700 border-cyan-200";
-    if (status === "Assigned") return "bg-violet-50 text-violet-700 border-violet-200";
-    if (status === "Archived") return "bg-slate-100 text-slate-500 border-slate-200";
-    if (status === "Reviewed") return "bg-lime-50 text-lime-700 border-lime-200";
-    return "bg-white text-slate-700 border-slate-200";
-  };
-
-  const getCoverageClasses = (status: CoverageStatus) => {
-    if (status === "matched") return "bg-emerald-50 text-emerald-700 border-emerald-200";
-    if (status === "possible") return "bg-amber-50 text-amber-800 border-amber-200";
-    if (status === "baseline") return "bg-amber-50 text-amber-800 border-amber-200";
-    return "bg-rose-50 text-rose-700 border-rose-200";
-  };
-
-  const renderCoverageAuditCard = (entry: CoverageAuditEntry) => {
-    const workflow = getWorkflow(entry.deskStory);
-
-    return (
-      <article
-        key={entry.deskStory.id}
-        className={cn(
-          "rounded-3xl border bg-white p-4 shadow-sm md:p-5",
-          entry.status === "not_found" && "border-rose-200 ring-1 ring-rose-100",
-          entry.status === "possible" && "border-amber-200 ring-1 ring-amber-100",
-          entry.status === "matched" && "border-emerald-200",
-        )}
-      >
-        <div className="flex flex-col gap-4 xl:grid xl:grid-cols-[1fr_360px]">
-          <div className="space-y-3">
-            <div className="flex flex-wrap items-center gap-2">
-              <span className={cn("rounded-full border px-2.5 py-1 text-[10px] font-black uppercase tracking-widest", getCoverageClasses(entry.status))}>
-                {getAuditStatusLabel(entry.status)}
-              </span>
-              <span className="rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1 text-[10px] font-black uppercase tracking-widest text-slate-600">
-                {entry.importanceLabel} importance
-              </span>
-              <span className="rounded-full bg-slate-100 px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider text-slate-500">
-                {entry.deskStory.publicationName} • {entry.deskStory.story.originPage}
-              </span>
-            </div>
-
-            <button type="button" onClick={() => setSelectedStory(entry.deskStory.story)} className="block text-left">
-              <h3 className="text-lg font-black leading-tight tracking-tight text-slate-950 transition hover:text-emerald-700 md:text-xl">
-                {entry.deskStory.story.title}
-              </h3>
-              {entry.deskStory.story.subheadline && (
-                <p className="mt-1.5 text-sm italic leading-relaxed text-slate-500">
-                  {entry.deskStory.story.subheadline}
-                </p>
-              )}
-            </button>
-
-            <p className="line-clamp-3 text-sm leading-relaxed text-slate-600">
-              {entry.deskStory.story.summary}
-            </p>
-
-            <div className="grid gap-2 sm:grid-cols-3">
-              <div className="rounded-2xl bg-slate-50 p-3">
-                <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Confidence</p>
-                <p className="mt-1 font-mono text-2xl font-black text-slate-950">{entry.confidence}%</p>
-              </div>
-              <div className="rounded-2xl bg-slate-50 p-3">
-                <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Importance</p>
-                <p className="mt-1 font-mono text-2xl font-black text-slate-950">{entry.importanceScore}</p>
-              </div>
-              <div className="rounded-2xl bg-slate-50 p-3">
-                <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Action</p>
-                <p className="mt-1 text-sm font-black leading-tight text-slate-900">{entry.actionLabel}</p>
-              </div>
-            </div>
-
-            <div className="grid gap-2 md:grid-cols-3" onClick={(event) => event.stopPropagation()}>
-              <label className="space-y-1">
-                <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">Status</span>
-                <select
-                  value={workflow.status}
-                  onChange={(event) => updateWorkflow(entry.deskStory, { status: event.target.value as StoryStatus })}
-                  className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-bold text-slate-700 outline-none focus:border-emerald-400"
-                >
-                  {statusOptions.map((status) => (
-                    <option key={status} value={status}>{status}</option>
-                  ))}
-                </select>
-              </label>
-              <label className="space-y-1">
-                <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">Priority</span>
-                <select
-                  value={workflow.priority}
-                  onChange={(event) => updateWorkflow(entry.deskStory, { priority: event.target.value as StoryPriority })}
-                  className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-bold text-slate-700 outline-none focus:border-emerald-400"
-                >
-                  {priorityOptions.map((priority) => (
-                    <option key={priority} value={priority}>{priority}</option>
-                  ))}
-                </select>
-              </label>
-              <label className="space-y-1">
-                <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">Assign</span>
-                <select
-                  value={workflow.assignedTo}
-                  onChange={(event) => {
-                    const assignedTo = event.target.value;
-                    updateWorkflow(entry.deskStory, {
-                      assignedTo,
-                      status: assignedTo === "Unassigned" ? workflow.status : "Assigned",
-                    });
-                  }}
-                  className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-bold text-slate-700 outline-none focus:border-emerald-400"
-                >
-                  {assigneeOptions.map((assignee) => (
-                    <option key={assignee} value={assignee}>{assignee}</option>
-                  ))}
-                </select>
-              </label>
-            </div>
-          </div>
-
-          <aside className="space-y-3 rounded-2xl border border-slate-200 bg-slate-50 p-4">
-            {entry.bestDailyStarMatch && (
-              <button
-                type="button"
-                onClick={() => setSelectedStory(entry.bestDailyStarMatch!.story)}
-                className="w-full rounded-xl border border-amber-100 bg-amber-50 p-3 text-left transition hover:bg-amber-100"
-              >
-                <p className="text-[10px] font-black uppercase tracking-widest text-amber-700">Best Daily Star candidate</p>
-                <p className="mt-1 line-clamp-3 text-sm font-black leading-snug text-slate-950">
-                  {entry.bestDailyStarMatch.story.title}
-                </p>
-              </button>
-            )}
-
-            <div className="rounded-xl bg-white p-3">
-              <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Evidence used</p>
-              <ul className="mt-2 space-y-1.5 text-xs font-semibold leading-relaxed text-slate-700">
-                {entry.sharedEvidence.slice(0, 5).map((item) => (
-                  <li key={item}>- {item}</li>
-                ))}
-              </ul>
-            </div>
-
-            {entry.conflicts.length > 0 && (
-              <div className="rounded-xl bg-white p-3">
-                <p className="text-[10px] font-black uppercase tracking-widest text-rose-500">Why not auto-close</p>
-                <ul className="mt-2 space-y-1.5 text-xs font-semibold leading-relaxed text-slate-700">
-                  {entry.conflicts.slice(0, 4).map((item) => (
-                    <li key={item}>- {item}</li>
-                  ))}
-                </ul>
-              </div>
-            )}
-
-            <div className="rounded-xl bg-white p-3">
-              <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Editor note</p>
-              <p className="mt-2 text-xs font-semibold leading-relaxed text-slate-700">{entry.editorNote}</p>
-            </div>
-          </aside>
-        </div>
-      </article>
-    );
-  };
-
   const renderDeskStoryCard = (deskStory: NewsDeskStory, compact = false) => {
-    const workflow = getWorkflow(deskStory);
-    const needsReview = isNeedsReview(deskStory, workflow);
-    const peerMatches = peerMatchesByStoryId.get(deskStory.id) || [];
-    const auditEntry = coverageAuditByStoryId.get(deskStory.id);
-
     return (
       <article
         key={deskStory.id}
         className={cn(
           "rounded-2xl border bg-white shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-md",
           deskStory.isMainPublication ? "border-amber-200 ring-1 ring-amber-100" : "border-slate-200",
-          needsReview && "border-l-4 border-l-rose-400",
           compact ? "p-4" : "p-5"
         )}
       >
@@ -1384,12 +1071,6 @@ export default function Home() {
             </span>
             <span className="rounded-full bg-slate-100 px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider text-slate-500">
               {deskStory.sectionLabel} • {deskStory.story.originPage}
-            </span>
-            <span className={cn("rounded-full border px-2.5 py-1 text-[10px] font-black uppercase tracking-wider", getPriorityClasses(workflow.priority))}>
-              {workflow.priority}
-            </span>
-            <span className={cn("rounded-full border px-2.5 py-1 text-[10px] font-black uppercase tracking-wider", getStatusClasses(workflow.status))}>
-              {workflow.status}
             </span>
           </div>
 
@@ -1424,35 +1105,25 @@ export default function Home() {
                 Daily Star Compare
               </div>
               <p className="text-xs font-bold text-slate-800">
-                {auditEntry ? getAuditStatusLabel(auditEntry.status) : deskStory.comparisonLabel}
-                {!deskStory.isMainPublication && ` • ${auditEntry ? auditEntry.confidence : deskStory.comparisonScore}%`}
+                {deskStory.isMainPublication ? "Daily Star baseline" : `${deskStory.comparisonLabel} • ${deskStory.comparisonScore}%`}
               </p>
               {deskStory.mainMatchTitle && (
                 <p className="mt-1 text-[11px] leading-relaxed text-slate-500 line-clamp-2">
                   Baseline: {deskStory.mainMatchTitle}
                 </p>
               )}
-              {auditEntry && auditEntry.status !== "matched" && (
-                <p className="mt-1 text-[11px] leading-relaxed text-slate-500 line-clamp-2">
-                  {auditEntry.editorNote}
-                </p>
-              )}
             </div>
 
             <div className="rounded-xl bg-slate-50 border border-slate-200 p-3">
               <div className="mb-1 flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-slate-400">
-                <Target className="h-3.5 w-3.5" />
-                Other Publications
+                <Star className="h-3.5 w-3.5" />
+                Editorial Weight
               </div>
               <p className="text-xs font-bold text-slate-800">
-                {peerMatches.length > 0
-                  ? `${peerMatches.length} related story${peerMatches.length === 1 ? "" : "ies"} found`
-                  : "No related story found"}
+                {getImportanceScore(deskStory)} importance score
               </p>
               <p className="mt-1 text-[11px] text-slate-500 line-clamp-2">
-                {peerMatches[0]
-                  ? `${peerMatches[0].story.publicationName}: ${peerMatches[0].story.story.title}`
-                  : (needsReview ? "Needs human review" : "Ready for desk flow")}
+                {deskStory.section === "frontPage" ? "Front-page placement increases missed-news ranking." : "Ranked by source placement and public-interest signals."}
               </p>
             </div>
           </div>
@@ -1462,69 +1133,131 @@ export default function Home() {
               Jump merged from {deskStory.story.jumpMerged}
             </div>
           )}
-
-          <div className="grid gap-2 md:grid-cols-3" onClick={(event) => event.stopPropagation()}>
-            <label className="space-y-1">
-              <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">Status</span>
-              <select
-                value={workflow.status}
-                onChange={(event) => updateWorkflow(deskStory, { status: event.target.value as StoryStatus })}
-                className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-bold text-slate-700 outline-none focus:border-emerald-400"
-              >
-                {statusOptions.map((status) => (
-                  <option key={status} value={status}>{status}</option>
-                ))}
-              </select>
-            </label>
-            <label className="space-y-1">
-              <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">Priority</span>
-              <select
-                value={workflow.priority}
-                onChange={(event) => updateWorkflow(deskStory, { priority: event.target.value as StoryPriority })}
-                className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-bold text-slate-700 outline-none focus:border-emerald-400"
-              >
-                {priorityOptions.map((priority) => (
-                  <option key={priority} value={priority}>{priority}</option>
-                ))}
-              </select>
-            </label>
-            <label className="space-y-1">
-              <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">Assign</span>
-              <select
-                value={workflow.assignedTo}
-                onChange={(event) => {
-                  const assignedTo = event.target.value;
-                  updateWorkflow(deskStory, {
-                    assignedTo,
-                    status: assignedTo === "Unassigned" ? workflow.status : "Assigned",
-                  });
-                }}
-                className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-bold text-slate-700 outline-none focus:border-emerald-400"
-              >
-                {assigneeOptions.map((assignee) => (
-                  <option key={assignee} value={assignee}>{assignee}</option>
-                ))}
-              </select>
-            </label>
-          </div>
-
-          <label className="space-y-1">
-            <span className="flex items-center gap-1.5 text-[10px] font-black uppercase tracking-widest text-slate-400">
-              <MessageSquare className="h-3.5 w-3.5" />
-              Editor Note
-            </span>
-            <textarea
-              value={workflow.note}
-              onChange={(event) => updateWorkflow(deskStory, { note: event.target.value })}
-              placeholder="Reporter brief, missing fact, follow-up source..."
-              rows={compact ? 2 : 3}
-              className="w-full resize-none rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs leading-relaxed text-slate-700 outline-none focus:border-emerald-400 focus:bg-white"
-            />
-          </label>
         </div>
       </article>
     );
   };
+
+  const renderMatchClusterCard = (cluster: DailyStarCluster) => (
+    <article key={cluster.anchor.id} className="rounded-3xl border border-emerald-200 bg-white p-5 shadow-sm">
+      <div className="rounded-2xl bg-emerald-50 p-4">
+        <p className="mb-1 flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-emerald-700">
+          <Star className="h-3.5 w-3.5 fill-emerald-500" />
+          Daily Star Anchor
+        </p>
+        <button type="button" onClick={() => setSelectedStory(cluster.anchor.story)} className="text-left">
+          <h3 className="text-lg font-black leading-tight text-slate-950">{cluster.anchor.story.title}</h3>
+        </button>
+        <p className="mt-2 line-clamp-2 text-sm leading-relaxed text-slate-600">{cluster.anchor.story.summary}</p>
+      </div>
+      <div className="mt-4 grid gap-3 md:grid-cols-2">
+        {cluster.matches.map((match) => (
+          <button
+            key={match.story.id}
+            type="button"
+            onClick={() => setSelectedStory(match.story.story)}
+            className="rounded-2xl border border-slate-200 bg-slate-50 p-4 text-left transition hover:border-emerald-200 hover:bg-emerald-50"
+          >
+            <div className="mb-2 flex flex-wrap items-center gap-2">
+              <span className="rounded-full bg-emerald-600 px-2.5 py-1 text-[10px] font-black uppercase tracking-widest text-white">100% Match</span>
+              <span className="rounded-full bg-white px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider text-slate-500">
+                {match.story.publicationName} • {match.story.story.originPage}
+              </span>
+            </div>
+            <p className="line-clamp-2 text-sm font-black leading-snug text-slate-950">{match.story.story.title}</p>
+            <p className="mt-2 line-clamp-2 text-xs font-semibold leading-relaxed text-slate-600">
+              {match.evidence.slice(0, 3).join(" • ") || "Strict headline and factual overlap confirmed."}
+            </p>
+          </button>
+        ))}
+      </div>
+    </article>
+  );
+
+  const renderMissedClusterCard = (cluster: MissedStoryCluster) => (
+    <article
+      key={cluster.id}
+      className={cn(
+        "rounded-3xl border bg-white p-5 shadow-sm",
+        cluster.publicationCount >= 2 ? "border-rose-200 ring-1 ring-rose-100" : "border-slate-200"
+      )}
+    >
+      <div className="grid gap-4 xl:grid-cols-[1fr_340px]">
+        <div className="space-y-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className={cn(
+              "rounded-full px-2.5 py-1 text-[10px] font-black uppercase tracking-widest",
+              cluster.publicationCount >= 2 ? "bg-rose-600 text-white" : "bg-slate-100 text-slate-600"
+            )}>
+              {cluster.publicationCount >= 2 ? "Possible Daily Star Missed" : "Single Publication Only"}
+            </span>
+            <span className="rounded-full bg-slate-100 px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider text-slate-500">
+              {cluster.publicationCount} publication{cluster.publicationCount === 1 ? "" : "s"} • {cluster.storyCount} item{cluster.storyCount === 1 ? "" : "s"}
+            </span>
+            <span className="rounded-full bg-amber-50 px-2.5 py-1 text-[10px] font-black uppercase tracking-widest text-amber-700">
+              {cluster.importanceScore} importance
+            </span>
+          </div>
+          <button type="button" onClick={() => setSelectedStory(cluster.leadStory.story)} className="block text-left">
+            <h3 className="text-lg font-black leading-tight tracking-tight text-slate-950 transition hover:text-rose-700 md:text-xl">
+              {cluster.leadStory.story.title}
+            </h3>
+            {cluster.leadStory.story.subheadline && (
+              <p className="mt-1.5 text-sm italic leading-relaxed text-slate-500">{cluster.leadStory.story.subheadline}</p>
+            )}
+          </button>
+          <p className="line-clamp-3 text-sm leading-relaxed text-slate-600">{cluster.leadStory.story.summary}</p>
+          <div className="grid gap-2 md:grid-cols-2">
+            {[cluster.leadStory, ...cluster.supportingStories.map((match) => match.story)].map((story) => (
+              <button
+                key={story.id}
+                type="button"
+                onClick={() => setSelectedStory(story.story)}
+                className="rounded-2xl border border-slate-200 bg-slate-50 p-3 text-left transition hover:border-rose-200 hover:bg-rose-50"
+              >
+                <p className="text-[10px] font-black uppercase tracking-widest text-slate-500">
+                  {story.publicationName} • {story.story.originPage}
+                </p>
+                <p className="mt-1 line-clamp-2 text-xs font-black leading-snug text-slate-950">{story.story.title}</p>
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <aside className="space-y-3 rounded-2xl border border-slate-200 bg-slate-50 p-4">
+          <div className="rounded-xl bg-white p-3">
+            <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Why it matters</p>
+            <ul className="mt-2 space-y-1.5 text-xs font-semibold leading-relaxed text-slate-700">
+              {cluster.importanceReasons.map((reason) => (
+                <li key={reason}>- {reason}</li>
+              ))}
+            </ul>
+          </div>
+          <div className="rounded-xl bg-white p-3">
+            <p className="text-[10px] font-black uppercase tracking-widest text-rose-500">Daily Star result</p>
+            <p className="mt-2 text-xs font-semibold leading-relaxed text-slate-700">
+              No confirmed Daily Star match found from uploaded OCR summaries for this date.
+            </p>
+          </div>
+          {cluster.weakDailyStarCandidate && (
+            <button
+              type="button"
+              onClick={() => setSelectedStory(cluster.weakDailyStarCandidate!.story.story)}
+              className="w-full rounded-xl border border-amber-100 bg-amber-50 p-3 text-left transition hover:bg-amber-100"
+            >
+              <p className="text-[10px] font-black uppercase tracking-widest text-amber-700">Weak Daily Star candidate</p>
+              <p className="mt-1 line-clamp-2 text-sm font-black leading-snug text-slate-950">
+                {cluster.weakDailyStarCandidate.story.story.title}
+              </p>
+              <p className="mt-2 text-xs font-semibold text-amber-800">
+                {cluster.weakDailyStarCandidate.score}% overlap, not enough evidence to mark as covered.
+              </p>
+            </button>
+          )}
+        </aside>
+      </div>
+    </article>
+  );
 
   return (
     <div
@@ -1801,19 +1534,19 @@ export default function Home() {
                         Cross-Publication Newsroom
                       </div>
                       <h1 className="max-w-3xl text-2xl font-black tracking-tight md:text-4xl">
-                        One desk for every story, with The Daily Star as the baseline.
+                        Find the stories The Daily Star may have missed.
                       </h1>
                       <p className="mt-3 max-w-2xl text-sm leading-relaxed text-slate-300 md:text-base">
-                        Editors can scan all publications together, compare angles against Daily Star, assign reporters, and push low-confidence or jump-merged stories into review.
+                        Same-date editions are clustered by strict evidence, so confirmed Daily Star matches stay together and unsupported stories stay separate.
                       </p>
                     </div>
                     <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-2">
                       {[
-                        { label: "All Stories", value: deskStories.length, icon: Newspaper },
-                        { label: "Daily Star", value: dailyStarStoryCount, icon: Star },
-                        { label: "Matched", value: totalMatches, icon: GitCompare },
-                        { label: "Missed", value: missedAuditEntries.length, icon: AlertTriangle },
-                        { label: "Review", value: possibleAuditEntries.length + needsReviewCount, icon: AlertTriangle },
+                        { label: "Daily Star Stories", value: dailyStarStoryCount, icon: Star },
+                        { label: "Confirmed Matches", value: totalMatches, icon: GitCompare },
+                        { label: "Possible Missed", value: missedStoryClusters.length, icon: AlertTriangle },
+                        { label: "Multi-Pub Missed", value: multiPublicationMissedClusters.length, icon: Layers },
+                        { label: "Single Only", value: singlePublicationMissedClusters.length, icon: Newspaper },
                       ].map((metric) => (
                         <div key={metric.label} className="rounded-2xl border border-white/10 bg-white/8 p-4 backdrop-blur">
                           <div className="mb-2 flex items-center justify-between text-slate-300">
@@ -1829,7 +1562,7 @@ export default function Home() {
               </section>
 
               <section className="rounded-3xl border border-slate-200 bg-white/90 p-3 shadow-sm backdrop-blur md:p-4">
-                <div className="grid gap-3 lg:grid-cols-[0.7fr_1.35fr_0.75fr_0.7fr_0.7fr]">
+                <div className="grid gap-3 lg:grid-cols-[0.7fr_1.5fr_0.9fr]">
                   <label className="relative">
                     <Calendar className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
                     <select
@@ -1838,8 +1571,6 @@ export default function Home() {
                         setDeskDate(event.target.value || null);
                         setDeskSearch("");
                         setDeskPublicationFilter("all");
-                        setDeskPriorityFilter("all");
-                        setDeskStatusFilter("all");
                       }}
                       className="h-11 w-full rounded-2xl border border-slate-200 bg-slate-50 pl-10 pr-3 text-sm font-bold text-slate-700 outline-none focus:border-emerald-400 focus:bg-white"
                     >
@@ -1872,26 +1603,6 @@ export default function Home() {
                       ))}
                     </select>
                   </label>
-                  <select
-                    value={deskPriorityFilter}
-                    onChange={(event) => setDeskPriorityFilter(event.target.value as StoryPriority | "all")}
-                    className="h-11 rounded-2xl border border-slate-200 bg-slate-50 px-3 text-sm font-bold text-slate-700 outline-none focus:border-emerald-400 focus:bg-white"
-                  >
-                    <option value="all">All priorities</option>
-                    {priorityOptions.map((priority) => (
-                      <option key={priority} value={priority}>{priority}</option>
-                    ))}
-                  </select>
-                  <select
-                    value={deskStatusFilter}
-                    onChange={(event) => setDeskStatusFilter(event.target.value as StoryStatus | "all")}
-                    className="h-11 rounded-2xl border border-slate-200 bg-slate-50 px-3 text-sm font-bold text-slate-700 outline-none focus:border-emerald-400 focus:bg-white"
-                  >
-                    <option value="all">All status</option>
-                    {statusOptions.map((status) => (
-                      <option key={status} value={status}>{status}</option>
-                    ))}
-                  </select>
                 </div>
 
                 {(isLoadingDeskEditions || deskLoadError || !hasDailyStarBaseline) && (
@@ -1931,396 +1642,113 @@ export default function Home() {
                 </div>
               </section>
 
-              {deskTab === "audit" && (
-                <section className="space-y-5">
-                  <div className="grid gap-4 lg:grid-cols-[1fr_380px]">
-                    <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
-                      <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
-                        <div>
-                          <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Daily Star Coverage Audit</p>
-                          <h2 className="mt-1 text-2xl font-black tracking-tight text-slate-950">
-                            Stories other papers carried that Daily Star may have missed.
-                          </h2>
-                          <p className="mt-2 max-w-3xl text-sm font-semibold leading-relaxed text-slate-500">
-                            This audit only compares uploaded OCR summaries from the selected date. A story is marked covered only when there is enough shared evidence; weak overlap stays in manual review.
-                          </p>
-                        </div>
-                        <span className="w-fit rounded-full bg-slate-950 px-3 py-1.5 text-xs font-black uppercase tracking-widest text-white">
-                          {deskDate || "No date"}
-                        </span>
-                      </div>
-
-                      <div className="mt-5 grid gap-3 sm:grid-cols-4">
-                        <div className="rounded-2xl bg-rose-50 p-4">
-                          <p className="text-[10px] font-black uppercase tracking-widest text-rose-700">Not found</p>
-                          <p className="mt-1 font-mono text-3xl font-black text-rose-950">{missedAuditEntries.length}</p>
-                        </div>
-                        <div className="rounded-2xl bg-red-50 p-4">
-                          <p className="text-[10px] font-black uppercase tracking-widest text-red-700">Urgent</p>
-                          <p className="mt-1 font-mono text-3xl font-black text-red-950">{urgentMissedAuditEntries.length}</p>
-                        </div>
-                        <div className="rounded-2xl bg-amber-50 p-4">
-                          <p className="text-[10px] font-black uppercase tracking-widest text-amber-700">Review</p>
-                          <p className="mt-1 font-mono text-3xl font-black text-amber-950">{possibleAuditEntries.length}</p>
-                        </div>
-                        <div className="rounded-2xl bg-emerald-50 p-4">
-                          <p className="text-[10px] font-black uppercase tracking-widest text-emerald-700">Covered</p>
-                          <p className="mt-1 font-mono text-3xl font-black text-emerald-950">{matchedAuditEntries.length}</p>
-                        </div>
-                      </div>
-                    </div>
-
-                    <aside className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
-                      <div className="mb-3 flex items-center gap-2">
-                        <CheckCircle2 className="h-5 w-5 text-emerald-600" />
-                        <h3 className="font-black text-slate-950">Authenticity Rules</h3>
-                      </div>
-                      <div className="space-y-3 text-xs font-semibold leading-relaxed text-slate-600">
-                        <p>Same date only. Different editions are never mixed into the audit.</p>
-                        <p>Confirmed coverage needs shared topic plus multiple factual terms, not just a broad category match.</p>
-                        <p>Low-confidence overlap is kept in manual review so editors are not pushed into false certainty.</p>
-                      </div>
-                    </aside>
-                  </div>
-
-                  {coverageAuditEntries.length > 0 ? (
-                    <div className="space-y-4">
-                      {missedAuditEntries.length > 0 && (
-                        <div className="space-y-3">
-                          <div className="flex items-center justify-between">
-                            <h3 className="text-lg font-black tracking-tight text-slate-950">Not Found In Daily Star</h3>
-                            <span className="rounded-full bg-rose-50 px-3 py-1 text-xs font-black uppercase tracking-widest text-rose-700">
-                              {missedAuditEntries.length}
-                            </span>
-                          </div>
-                          {missedAuditEntries.map(renderCoverageAuditCard)}
-                        </div>
-                      )}
-
-                      {possibleAuditEntries.length > 0 && (
-                        <div className="space-y-3">
-                          <div className="flex items-center justify-between">
-                            <h3 className="text-lg font-black tracking-tight text-slate-950">Needs Manual Review</h3>
-                            <span className="rounded-full bg-amber-50 px-3 py-1 text-xs font-black uppercase tracking-widest text-amber-700">
-                              {possibleAuditEntries.length}
-                            </span>
-                          </div>
-                          {possibleAuditEntries.map(renderCoverageAuditCard)}
-                        </div>
-                      )}
-
-                      {matchedAuditEntries.length > 0 && (
-                        <div className="space-y-3">
-                          <div className="flex items-center justify-between">
-                            <h3 className="text-lg font-black tracking-tight text-slate-950">Published By Daily Star</h3>
-                            <span className="rounded-full bg-emerald-50 px-3 py-1 text-xs font-black uppercase tracking-widest text-emerald-700">
-                              {matchedAuditEntries.length}
-                            </span>
-                          </div>
-                          <div className="grid gap-3 lg:grid-cols-2">
-                            {matchedAuditEntries.map(renderCoverageAuditCard)}
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  ) : (
-                    <div className="rounded-3xl border border-dashed border-slate-300 bg-white p-10 text-center">
-                      <Search className="mx-auto mb-3 h-10 w-10 text-slate-300" />
-                      <h3 className="font-black text-slate-900">No audit items for this date</h3>
-                      <p className="mt-1 text-sm text-slate-500">
-                        Upload The Daily Star and at least one other publication for the same date to run the coverage audit.
-                      </p>
-                    </div>
-                  )}
-                </section>
-              )}
-
-              {deskTab === "top" && (
-                <section className="grid gap-4 xl:grid-cols-[1fr_360px]">
-                  <div className="space-y-4">
-                    <div className="flex items-center justify-between">
-                      <div>
-                        <h2 className="text-xl font-black tracking-tight text-slate-950">All News For {deskDate || "Selected Date"}</h2>
-                        <p className="text-sm text-slate-500">Publications are separated by date, with The Daily Star first as the baseline.</p>
-                      </div>
-                      <span className="rounded-full bg-white px-3 py-1 text-xs font-black text-slate-500 shadow-sm">
-                        {filteredDeskStories.length} visible
-                      </span>
-                    </div>
-
-                    {groupedPublicationSections.length > 0 ? (
-                      <div className="space-y-4">
-                        {groupedPublicationSections.map((section) => {
-                          const isBaselineSection = isDailyStarPublication(section.publication.id, section.publication.name);
-                          return (
-                            <div
-                              key={`${section.publication.id}-${section.publication.date}`}
-                              className={cn(
-                                "rounded-3xl border bg-white p-4 shadow-sm md:p-5",
-                                isBaselineSection ? "border-amber-200 ring-1 ring-amber-100" : "border-slate-200"
-                              )}
-                            >
-                              <div className="mb-4 flex flex-col gap-2 border-b border-slate-100 pb-4 md:flex-row md:items-center md:justify-between">
-                                <div>
-                                  <div className="flex flex-wrap items-center gap-2">
-                                    <h3 className="text-lg font-black leading-tight text-slate-950">
-                                      {section.publication.name}
-                                    </h3>
-                                    {isBaselineSection && (
-                                      <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2.5 py-1 text-[10px] font-black uppercase tracking-widest text-amber-700">
-                                        <Star className="h-3 w-3 fill-amber-400 text-amber-500" />
-                                        Baseline
-                                      </span>
-                                    )}
-                                  </div>
-                                  <p className="mt-1 text-xs font-semibold text-slate-500">
-                                    {section.publication.date} • {section.publication.edition}
-                                  </p>
-                                </div>
-                                <span className="w-fit rounded-full bg-slate-100 px-3 py-1 text-xs font-black text-slate-600">
-                                  {section.stories.length} news
-                                </span>
-                              </div>
-                              {section.stories.length > 0 ? (
-                                <div className="space-y-3">
-                                  {section.stories.map((deskStory) => renderDeskStoryCard(deskStory))}
-                                </div>
-                              ) : (
-                                <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-5 text-sm font-semibold text-slate-500">
-                                  No summary news extracted for this publication on {section.publication.date}. Re-run OCR with the needed pages selected.
-                                </div>
-                              )}
-                            </div>
-                          );
-                        })}
-                      </div>
-                    ) : (
-                      <div className="rounded-3xl border border-dashed border-slate-300 bg-white p-10 text-center">
-                        <Search className="mx-auto mb-3 h-10 w-10 text-slate-300" />
-                        <h3 className="font-black text-slate-900">No news found for this date</h3>
-                        <p className="mt-1 text-sm text-slate-500">Select a date that has OCR summaries, or clear search and workflow filters.</p>
-                      </div>
-                    )}
-                  </div>
-
-                  <aside className="space-y-4">
-                    <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
-                      <div className="mb-4 flex items-center gap-2">
-                        <AlertTriangle className="h-5 w-5 text-rose-500" />
-                        <h3 className="font-black text-slate-950">Fast Review Queue</h3>
-                      </div>
-                      <div className="space-y-3">
-                        {reviewQueueStories.slice(0, 4).map((deskStory) => (
-                          <button
-                            key={deskStory.id}
-                            type="button"
-                            onClick={() => setSelectedStory(deskStory.story)}
-                            className="w-full rounded-2xl border border-slate-200 bg-slate-50 p-3 text-left transition hover:border-rose-200 hover:bg-rose-50"
-                          >
-                            <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">
-                              {deskStory.publicationName} • {deskStory.story.originPage}
-                            </p>
-                            <p className="mt-1 line-clamp-2 text-sm font-black leading-snug text-slate-900">
-                              {deskStory.story.title}
-                            </p>
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-
-                    <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
-                      <div className="mb-4 flex items-center gap-2">
-                        <Users className="h-5 w-5 text-emerald-600" />
-                        <h3 className="font-black text-slate-950">Assigned Work</h3>
-                      </div>
-                      <div className="space-y-3">
-                        {assignedStories.length > 0 ? assignedStories.slice(0, 5).map((deskStory) => {
-                          const workflow = getWorkflow(deskStory);
-                          return (
-                            <div key={deskStory.id} className="rounded-2xl bg-emerald-50/70 p-3">
-                              <p className="text-[10px] font-black uppercase tracking-widest text-emerald-700">{workflow.assignedTo}</p>
-                              <p className="mt-1 line-clamp-2 text-sm font-black text-slate-900">{deskStory.story.title}</p>
-                            </div>
-                          );
-                        }) : (
-                          <p className="rounded-2xl bg-slate-50 p-4 text-sm font-semibold text-slate-500">
-                            No reporter assignments yet. Assign from any story card.
-                          </p>
-                        )}
-                      </div>
-                    </div>
-                  </aside>
-                </section>
-              )}
-
-              {deskTab === "clusters" && (
-                <section className="space-y-4">
-                  <div>
-                    <h2 className="text-xl font-black tracking-tight text-slate-950">Daily Star Anchored Story Clusters</h2>
-                    <p className="text-sm text-slate-500">Each cluster starts from The Daily Star, then shows related angles from other publications.</p>
-                  </div>
-                  <div className="grid gap-4">
-                    {storyClusters.map((cluster) => (
-                      <div key={cluster.anchor.id} className="rounded-3xl border border-amber-200 bg-white p-5 shadow-sm">
-                        <div className="mb-4 rounded-2xl bg-amber-50 p-4">
-                          <p className="mb-1 flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-amber-700">
-                            <Star className="h-3.5 w-3.5 fill-amber-400" />
-                            Daily Star Baseline
-                          </p>
-                          <h3 className="text-lg font-black leading-tight text-slate-950">{cluster.anchor.story.title}</h3>
-                          <p className="mt-2 line-clamp-2 text-sm leading-relaxed text-slate-600">{cluster.anchor.story.summary}</p>
-                        </div>
-                        {cluster.matches.length > 0 ? (
-                          <div className="grid gap-3 md:grid-cols-2">
-                            {cluster.matches.map((deskStory) => renderDeskStoryCard(deskStory, true))}
-                          </div>
-                        ) : (
-                          <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-4 text-sm font-semibold text-slate-500">
-                            No related story from other publications yet.
-                          </div>
-                        )}
-                      </div>
-                    ))}
-                    {uniqueNonBaselineStories.length > 0 && (
-                      <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
-                        <div className="mb-4">
-                          <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Unique Angles</p>
-                          <h3 className="text-lg font-black text-slate-950">Stories not strongly covered by Daily Star</h3>
-                        </div>
-                        <div className="grid gap-3 md:grid-cols-2">
-                          {uniqueNonBaselineStories.map((deskStory) => renderDeskStoryCard(deskStory, true))}
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                </section>
-              )}
-
-              {deskTab === "gaps" && (
+              {deskTab === "missed" && (
                 <section className="space-y-4">
                   <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
                     <div>
-                      <h2 className="text-xl font-black tracking-tight text-slate-950">Possible Daily Star Coverage Gaps</h2>
-                      <p className="text-sm text-slate-500">Important same-date stories that appear outside The Daily Star or have weak Daily Star similarity.</p>
+                      <h2 className="text-xl font-black tracking-tight text-slate-950">Possible Daily Star Missed</h2>
+                      <p className="text-sm text-slate-500">Ranked clusters from other publications with no confirmed Daily Star match.</p>
                     </div>
                     <span className="w-fit rounded-full bg-rose-50 px-3 py-1 text-xs font-black uppercase tracking-widest text-rose-700">
-                      {coverageGapStories.length} gap{coverageGapStories.length === 1 ? "" : "s"}
+                      {missedStoryClusters.length} candidate{missedStoryClusters.length === 1 ? "" : "s"}
                     </span>
                   </div>
-
-                  {coverageGapStories.length > 0 ? (
+                  {missedStoryClusters.length > 0 ? (
                     <div className="space-y-4">
-                      {coverageGapStories.map((deskStory) => {
-                        const peerMatches = peerMatchesByStoryId.get(deskStory.id) || [];
-                        return (
-                          <div key={deskStory.id} className="grid gap-4 rounded-3xl border border-rose-200 bg-white p-5 shadow-sm xl:grid-cols-[1fr_360px]">
-                            <div>
-                              {renderDeskStoryCard(deskStory)}
-                            </div>
-                            <aside className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
-                              <div className="mb-3 flex items-center gap-2">
-                                <GitCompare className="h-4 w-4 text-rose-600" />
-                                <h3 className="text-sm font-black text-slate-950">Coverage Evidence</h3>
-                              </div>
-                              <div className="space-y-3">
-                                <div className="rounded-xl bg-white p-3">
-                                  <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Daily Star score</p>
-                                  <p className="mt-1 font-mono text-2xl font-black text-rose-700">{deskStory.comparisonScore}%</p>
-                                </div>
-                                {peerMatches.length > 0 ? peerMatches.slice(0, 4).map((match) => (
-                                  <button
-                                    key={match.story.id}
-                                    type="button"
-                                    onClick={() => setSelectedStory(match.story.story)}
-                                    className="w-full rounded-xl bg-white p-3 text-left transition hover:bg-emerald-50"
-                                  >
-                                    <p className="text-[10px] font-black uppercase tracking-widest text-emerald-700">
-                                      {match.score}% • {match.story.publicationName}
-                                    </p>
-                                    <p className="mt-1 line-clamp-2 text-xs font-black leading-snug text-slate-900">
-                                      {match.story.story.title}
-                                    </p>
-                                  </button>
-                                )) : (
-                                  <p className="rounded-xl bg-white p-3 text-xs font-semibold leading-relaxed text-slate-500">
-                                    No supporting publication match yet. This is still flagged because it is high priority or front-page news.
-                                  </p>
-                                )}
-                              </div>
-                            </aside>
-                          </div>
-                        );
-                      })}
+                      {missedStoryClusters.map(renderMissedClusterCard)}
                     </div>
                   ) : (
                     <div className="rounded-3xl border border-emerald-200 bg-emerald-50 p-8 text-center">
                       <CheckCircle2 className="mx-auto mb-3 h-10 w-10 text-emerald-600" />
-                      <h3 className="font-black text-emerald-950">No obvious Daily Star gap for this filter</h3>
+                      <h3 className="font-black text-emerald-950">No missed Daily Star candidate for this filter</h3>
                       <p className="mt-1 text-sm font-semibold text-emerald-700">
-                        Important same-date stories are either covered by Daily Star or not repeated strongly enough elsewhere.
+                        Strict same-date evidence did not find unsupported stories outside Daily Star.
                       </p>
                     </div>
                   )}
                 </section>
               )}
 
-              {deskTab === "assignments" && (
+              {deskTab === "matched" && (
                 <section className="space-y-4">
-                  <div>
-                    <h2 className="text-xl font-black tracking-tight text-slate-950">Reporter Assignment Board</h2>
-                    <p className="text-sm text-slate-500">Desk-wise work queue. Assignments stay saved in this browser until backend workflow tables are added.</p>
+                  <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                    <div>
+                      <h2 className="text-xl font-black tracking-tight text-slate-950">Daily Star Matched</h2>
+                      <p className="text-sm text-slate-500">Only confirmed same-story matches are grouped under the Daily Star headline.</p>
+                    </div>
+                    <span className="w-fit rounded-full bg-emerald-50 px-3 py-1 text-xs font-black uppercase tracking-widest text-emerald-700">
+                      {dailyStarClusters.length} cluster{dailyStarClusters.length === 1 ? "" : "s"}
+                    </span>
                   </div>
-                  <div className="grid gap-4 lg:grid-cols-2">
-                    {assigneeOptions.map((assignee) => {
-                      const storiesForAssignee = filteredDeskStories.filter((deskStory) => getWorkflow(deskStory).assignedTo === assignee);
-                      return (
-                        <div key={assignee} className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
-                          <div className="mb-4 flex items-center justify-between">
-                            <div className="flex items-center gap-2">
-                              <Users className="h-5 w-5 text-emerald-600" />
-                              <h3 className="font-black text-slate-950">{assignee}</h3>
-                            </div>
-                            <span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-black text-slate-500">
-                              {storiesForAssignee.length}
-                            </span>
-                          </div>
-                          <div className="space-y-3">
-                            {storiesForAssignee.length > 0 ? storiesForAssignee.map((deskStory) => renderDeskStoryCard(deskStory, true)) : (
-                              <p className="rounded-2xl bg-slate-50 p-4 text-sm font-semibold text-slate-500">
-                                No stories in this lane.
-                              </p>
-                            )}
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
+                  {dailyStarClusters.length > 0 ? (
+                    <div className="space-y-4">
+                      {dailyStarClusters.map(renderMatchClusterCard)}
+                    </div>
+                  ) : (
+                    <div className="rounded-3xl border border-dashed border-slate-300 bg-white p-10 text-center">
+                      <Search className="mx-auto mb-3 h-10 w-10 text-slate-300" />
+                      <h3 className="font-black text-slate-900">No confirmed Daily Star matches</h3>
+                      <p className="mt-1 text-sm text-slate-500">Upload same-date Daily Star and other editions, or widen the publication filter.</p>
+                    </div>
+                  )}
                 </section>
               )}
 
-              {deskTab === "review" && (
+              {deskTab === "human_check" && (
                 <section className="space-y-4">
-                  <div>
-                    <h2 className="text-xl font-black tracking-tight text-slate-950">Quality And Trust Review Queue</h2>
-                    <p className="text-sm text-slate-500">Jump-merged, new, and weakly matched stories come here first so editors can verify context.</p>
+                  <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                    <div>
+                      <h2 className="text-xl font-black tracking-tight text-slate-950">Needs Human Check</h2>
+                      <p className="text-sm text-slate-500">Weak Daily Star candidates stay here because evidence is not strong enough to call them covered.</p>
+                    </div>
+                    <span className="w-fit rounded-full bg-amber-50 px-3 py-1 text-xs font-black uppercase tracking-widest text-amber-700">
+                      {humanCheckClusters.length} weak candidate{humanCheckClusters.length === 1 ? "" : "s"}
+                    </span>
                   </div>
-                  <div className="grid gap-4 lg:grid-cols-2">
-                    {reviewQueueStories.length > 0 ? reviewQueueStories.map((deskStory) => renderDeskStoryCard(deskStory)) : (
-                      <div className="rounded-3xl border border-emerald-200 bg-emerald-50 p-8 text-center lg:col-span-2">
-                        <CheckCircle2 className="mx-auto mb-3 h-10 w-10 text-emerald-600" />
-                        <h3 className="font-black text-emerald-950">Review queue is clear</h3>
-                        <p className="mt-1 text-sm font-semibold text-emerald-700">No filtered story currently needs manual attention.</p>
-                      </div>
-                    )}
-                  </div>
+                  {humanCheckClusters.length > 0 ? (
+                    <div className="space-y-4">
+                      {humanCheckClusters.map(renderMissedClusterCard)}
+                    </div>
+                  ) : (
+                    <div className="rounded-3xl border border-dashed border-slate-300 bg-white p-10 text-center">
+                      <Search className="mx-auto mb-3 h-10 w-10 text-slate-300" />
+                      <h3 className="font-black text-slate-900">No weak Daily Star candidates</h3>
+                      <p className="mt-1 text-sm text-slate-500">Current evidence is either confirmed matched or clearly missing.</p>
+                    </div>
+                  )}
                 </section>
               )}
 
-              {deskTab === "publications" && (
+              {deskTab === "single" && (
+                <section className="space-y-4">
+                  <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                    <div>
+                      <h2 className="text-xl font-black tracking-tight text-slate-950">Single Publication Only</h2>
+                      <p className="text-sm text-slate-500">Items that appear in only one non-Daily-Star publication are kept separate from bigger missed-news candidates.</p>
+                    </div>
+                    <span className="w-fit rounded-full bg-slate-100 px-3 py-1 text-xs font-black uppercase tracking-widest text-slate-600">
+                      {singlePublicationMissedClusters.length} item{singlePublicationMissedClusters.length === 1 ? "" : "s"}
+                    </span>
+                  </div>
+                  {singlePublicationMissedClusters.length > 0 ? (
+                    <div className="space-y-4">
+                      {singlePublicationMissedClusters.map(renderMissedClusterCard)}
+                    </div>
+                  ) : (
+                    <div className="rounded-3xl border border-dashed border-slate-300 bg-white p-10 text-center">
+                      <Search className="mx-auto mb-3 h-10 w-10 text-slate-300" />
+                      <h3 className="font-black text-slate-900">No single-publication items</h3>
+                      <p className="mt-1 text-sm text-slate-500">Every visible non-Daily-Star item is either matched or supported by another source.</p>
+                    </div>
+                  )}
+                </section>
+              )}
+
+              {deskTab === "all" && (
                 <section className="space-y-4">
                   <div>
                     <h2 className="text-xl font-black tracking-tight text-slate-950">Publication Comparison Matrix</h2>
-                    <p className="text-sm text-slate-500">Daily Star is treated as the main reference; other publications show match rate and unique angles.</p>
+                    <p className="text-sm text-slate-500">Daily Star is treated as the baseline; other publications show confirmed matches and unmatched items.</p>
                   </div>
                   <div className="grid gap-4 lg:grid-cols-3">
                     {publicationScorecards.map((scorecard) => (
@@ -2353,8 +1781,8 @@ export default function Home() {
                             <p className="mt-1 font-mono text-2xl font-black text-emerald-900">{scorecard.matchRate}%</p>
                           </div>
                           <div className="rounded-2xl bg-amber-50 p-3">
-                            <p className="text-[10px] font-black uppercase tracking-widest text-amber-700">High Priority</p>
-                            <p className="mt-1 font-mono text-2xl font-black text-amber-900">{scorecard.highPriorityStories}</p>
+                            <p className="text-[10px] font-black uppercase tracking-widest text-amber-700">Multi-Pub Missed</p>
+                            <p className="mt-1 font-mono text-2xl font-black text-amber-900">{scorecard.multiPublicationMissed}</p>
                           </div>
                           <div className="rounded-2xl bg-rose-50 p-3">
                             <p className="text-[10px] font-black uppercase tracking-widest text-rose-700">Unique</p>
@@ -2366,15 +1794,6 @@ export default function Home() {
                   </div>
                 </section>
               )}
-
-              <div className="rounded-3xl border border-slate-200 bg-white/80 p-4 text-xs leading-relaxed text-slate-500">
-                <div className="flex items-start gap-2">
-                  <Clock3 className="mt-0.5 h-4 w-4 shrink-0 text-slate-400" />
-                  <p>
-                    Frontend-only mode: status, priority, assignment, and notes are saved in this browser&apos;s localStorage. Backend tables can later make this shared across the full team.
-                  </p>
-                </div>
-              </div>
             </div>
           </div>
         )}
